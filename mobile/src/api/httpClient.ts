@@ -9,6 +9,7 @@ import {
   NeedDecision,
   NotificationItem,
   NotificationPreference,
+  ProfilePatch,
   RegisterInput,
   RenewalAttempt,
   Reservation,
@@ -88,6 +89,13 @@ export const httpClient = {
     return apiFetch<Omit<Student, 'password'>>('/api/auth/preferences', {
       method: 'PATCH',
       body: JSON.stringify({ notificationPreference: pref }),
+    });
+  },
+
+  async updateProfile(patch: ProfilePatch): Promise<Omit<Student, 'password'>> {
+    return apiFetch<Omit<Student, 'password'>>('/api/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
     });
   },
 

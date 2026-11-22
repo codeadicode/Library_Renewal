@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { AuthService } from '../services/AuthService';
-import { loginSchema, registerSchema, preferenceSchema } from '../validators';
+import { loginSchema, registerSchema, preferenceSchema, profileSchema } from '../validators';
 
 export class AuthController {
   constructor(private authService: AuthService) {}
@@ -46,5 +46,15 @@ export class AuthController {
       next(err);
     }
   };
-}
 
+  public updateProfile = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const userId = req.user!.id;
+      const patch = profileSchema.parse(req.body);
+      const updated = await this.authService.updateProfile(userId, patch);
+      res.status(200).json(updated);
+    } catch (err) {
+      next(err);
+    }
+  };
+}

@@ -1,12 +1,15 @@
 import { useState } from 'react';
-import { ScrollView, StyleSheet } from 'react-native';
+import { ScrollView } from 'react-native';
 
 import { useAuth } from '@/src/auth/AuthContext';
 import { AppText, Field, PrimaryButton } from '@/src/components/ui';
-import { colors, spacing } from '@/src/theme/tokens';
+import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
+import { spacing } from '@/src/theme/tokens';
 
 export default function RegisterScreen() {
   const { register } = useAuth();
+  const { colors } = useTheme();
+  const styles = useStyles();
   const [form, setForm] = useState({
     studentId: '',
     name: '',
@@ -23,12 +26,9 @@ export default function RegisterScreen() {
   }
 
   async function onSubmit() {
-    if (Object.values(form).some((v) => !v.trim())) {
-      setError('Fill in every field.');
-      return;
-    }
-    if (form.password.length < 8) {
-      setError('Use at least 8 characters.');
+    const { password: _password, ...required } = form;
+    if (Object.values(required).some((v) => !v.trim())) {
+      setError('Fill in every field (password is optional).');
       return;
     }
     setBusy(true);
@@ -43,11 +43,8 @@ export default function RegisterScreen() {
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-      <AppText variant="caption">
-        Accounts stay on this device session only. Phase 2 will persist them in PostgreSQL with hashed
-        passwords.
-      </AppText>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+      <AppText variant="caption">Demo accounts only last for this app session.</AppText>
       <Field label="Student ID" value={form.studentId} onChangeText={(v) => set('studentId', v)} autoCapitalize="none" />
       <Field label="Name" value={form.name} onChangeText={(v) => set('name', v)} autoCapitalize="words" />
       <Field
@@ -57,7 +54,14 @@ export default function RegisterScreen() {
         keyboardType="email-address"
         autoCapitalize="none"
       />
-      <Field label="Password" value={form.password} onChangeText={(v) => set('password', v)} secure autoCapitalize="none" />
+      <Field
+        label="Password (optional)"
+        value={form.password}
+        onChangeText={(v) => set('password', v)}
+        secure
+        autoCapitalize="none"
+        placeholder="Not checked in this demo"
+      />
       <Field label="Course / department" value={form.course} onChangeText={(v) => set('course', v)} />
       <Field label="Academic year" value={form.academicYear} onChangeText={(v) => set('academicYear', v)} />
       {error ? (
@@ -70,6 +74,7 @@ export default function RegisterScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((c) => ({
+  screen: { flex: 1, backgroundColor: c.background },
   content: { padding: spacing.lg, gap: spacing.md },
-});
+}));

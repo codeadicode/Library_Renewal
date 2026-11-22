@@ -26,7 +26,7 @@ describe('Renewal Eligibility Engine', () => {
   });
 
   test('Permits renewal for eligible book with correct +14 days projection', async () => {
-    // Akash Dhuri (1RV25CS013) with Database System Concepts
+    // Akash Tiwari (1RV25CS013) with Database System Concepts
     const { eligibility, loan } = await service.evaluateEligibility('l-akash-dsc', 'u-akash');
     expect(eligibility.eligible).toBe(true);
     expect(eligibility.reason_code).toBe('RENEWAL_SUCCESS');
@@ -41,7 +41,7 @@ describe('Renewal Eligibility Engine', () => {
   });
 
   test('Blocks renewal when active reservation exists by another student', async () => {
-    // Akash with OS Concepts (reserved by Aadya Tiwari 1RZ25CS003)
+    // Akash with OS Concepts (reserved by Aadya Dhuri 1RZ25CS003)
     const { eligibility } = await service.evaluateEligibility('l-akash-os', 'u-akash');
     expect(eligibility.eligible).toBe(false);
     expect(eligibility.reason_code).toBe('ACTIVE_RESERVATION');

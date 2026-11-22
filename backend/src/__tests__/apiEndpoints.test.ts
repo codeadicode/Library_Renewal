@@ -6,7 +6,7 @@ describe('LibTrack REST API Endpoints', () => {
   let akashToken: string;
 
   beforeAll(async () => {
-    // Login as Akash Dhuri (1RV25CS013)
+    // Login as Akash Tiwari (1RV25CS013)
     const res = await request(app)
       .post('/api/auth/login')
       .send({ identifier: '1RV25CS013', password: 'demo1234' });
@@ -27,7 +27,40 @@ describe('LibTrack REST API Endpoints', () => {
       .set('Authorization', `Bearer ${akashToken}`);
     expect(res.status).toBe(200);
     expect(res.body.studentId).toBe('1RV25CS013');
-    expect(res.body.name).toBe('Akash Dhuri');
+    expect(res.body.name).toBe('Akash Tiwari');
+  });
+
+  test('POST /api/auth/login accepts any password for a known student', async () => {
+    const wrong = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: '1RZ25CS003', password: 'anything-at-all' });
+    expect(wrong.status).toBe(200);
+    expect(wrong.body.user.name).toBe('Aadya Dhuri');
+
+    const none = await request(app).post('/api/auth/login').send({ identifier: 'aadya@campus.demo' });
+    expect(none.status).toBe(200);
+
+    const unknown = await request(app).post('/api/auth/login').send({ identifier: 'NOPE999', password: 'x' });
+    expect(unknown.status).toBe(401);
+  });
+
+  test('PATCH /api/auth/profile edits the student profile', async () => {
+    const login = await request(app).post('/api/auth/login').send({ identifier: '1RV25EC092' });
+    const token = login.body.token;
+    const res = await request(app)
+      .patch('/api/auth/profile')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Priya S', academicYear: 'Year 3' });
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Priya S');
+    expect(res.body.academicYear).toBe('Year 3');
+    expect(res.body.passwordHash).toBeUndefined();
+
+    const clash = await request(app)
+      .patch('/api/auth/profile')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'akash@campus.demo' });
+    expect(clash.status).toBe(409);
   });
 
   test('GET /api/books returns catalogue books with search and filter', async () => {

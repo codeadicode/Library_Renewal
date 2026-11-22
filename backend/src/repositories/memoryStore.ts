@@ -136,7 +136,7 @@ export class MemoryStore {
       {
         id: 'u-akash',
         studentId: '1RV25CS013',
-        name: 'Akash Dhuri',
+        name: 'Akash Tiwari',
         email: 'akash@campus.demo',
         passwordHash: demoPasswordHash,
         course: 'B.Tech Computer Science & Engineering',
@@ -149,7 +149,7 @@ export class MemoryStore {
       {
         id: 'u-aadya',
         studentId: '1RZ25CS003',
-        name: 'Aadya Tiwari',
+        name: 'Aadya Dhuri',
         email: 'aadya@campus.demo',
         passwordHash: demoPasswordHash,
         course: 'B.Tech Computer Science & Engineering',

@@ -105,7 +105,7 @@ async function main() {
     {
       id: 'u-akash',
       studentId: '1RV25CS013',
-      name: 'Akash Dhuri',
+      name: 'Akash Tiwari',
       email: 'akash@campus.demo',
       passwordHash,
       course: 'B.Tech Computer Science & Engineering',
@@ -115,7 +115,7 @@ async function main() {
     {
       id: 'u-aadya',
       studentId: '1RZ25CS003',
-      name: 'Aadya Tiwari',
+      name: 'Aadya Dhuri',
       email: 'aadya@campus.demo',
       passwordHash,
       course: 'B.Tech Computer Science & Engineering',

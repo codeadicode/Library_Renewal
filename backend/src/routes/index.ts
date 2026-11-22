@@ -87,6 +87,7 @@ export function createApiRouter(): Router {
   router.post('/auth/login', authCtrl.login);
   router.get('/auth/me', authMiddleware, authCtrl.getMe);
   router.patch('/auth/preferences', authMiddleware, authCtrl.updatePreferences);
+  router.patch('/auth/profile', authMiddleware, authCtrl.updateProfile);
 
   // Books catalogue routes
   router.get('/books/topics', authMiddleware, bookCtrl.getTopics);

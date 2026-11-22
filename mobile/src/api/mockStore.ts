@@ -31,6 +31,7 @@ import {
   NotificationItem,
   NotificationPreference,
   NOW,
+  ProfilePatch,
   RegisterInput,
   RenewalAttempt,
   Reservation,
@@ -235,10 +236,112 @@ export const mockApi = {
     const student = students.find(
       (s) => s.studentId.toLowerCase() === key || s.email.toLowerCase() === key,
     );
-    if (!student || student.password !== password) {
-      return Promise.reject(new Error('Student ID or password is incorrect.'));
+    // Demo mode: any password works for a known Student ID / email.
+    if (!student) {
+      return Promise.reject(new Error('No student found with that Student ID or email.'));
     }
     return delay(publicStudent(student));
+  },
+
+  async updateProfile(userId: string, patch: ProfilePatch) {
+    if (httpClient.isConfigured()) {
+      try {
+        return await httpClient.updateProfile(patch);
+      } catch (err: any) {
+        if (err.status) throw err;
+      }
+    }
+    const student = students.find((s) => s.id === userId);
+    if (!student) return Promise.reject(new Error('Session expired.'));
+    const clean: ProfilePatch = {};
+    (Object.keys(patch) as (keyof ProfilePatch)[]).forEach((k) => {
+      const v = patch[k]?.trim();
+      if (v) clean[k] = v;
+    });
+    if (clean.name !== undefined && clean.name.length < 2) {
+      return Promise.reject(new Error('Name must be at least 2 characters.'));
+    }
+    if (clean.email !== undefined) {
+      if (!/^\S+@\S+\.\S+$/.test(clean.email)) {
+        return Promise.reject(new Error('Enter a valid email address.'));
+      }
+      const taken = students.some(
+        (s) => s.id !== userId && s.email.toLowerCase() === clean.email!.toLowerCase(),
+      );
+      if (taken) return Promise.reject(new Error('That email is already used by another student.'));
+    }
+    Object.assign(student, clean);
+    return delay(publicStudent(student));
+  },
+
+  /** Simulated return: closes the loan, frees the copy and records any overdue fine. */
+  async returnLoan(userId: string, loanId: string) {
+    const loan = loans.find((l) => l.id === loanId && l.userId === userId);
+    if (!loan) return Promise.reject(new Error('Loan not found.'));
+    if (loan.status === 'RETURNED') return delay(loan);
+    const overdueDays = Math.max(0, -daysRemaining(loan.dueAt));
+    loan.status = 'RETURNED';
+    loan.returnedAt = formatISO(NOW);
+    loan.markedForReturn = false;
+    const copy = copies.find((c) => c.id === loan.copyId);
+    if (copy) copy.status = 'AVAILABLE';
+    const book = getBook(loan.bookId);
+    if (overdueDays > 0 && !fines.some((f) => f.loanId === loan.id)) {
+      fines.push({
+        id: nextId('f'),
+        userId,
+        loanId: loan.id,
+        amount: overdueDays * policy.finePerDay,
+        reason: `Overdue loan: ${book?.title ?? 'book'} (${overdueDays} days × ₹${policy.finePerDay}/day)`,
+        at: formatISO(NOW),
+        simulated: true,
+      });
+    }
+    activities.unshift({
+      id: nextId('a'),
+      userId,
+      at: formatISO(NOW),
+      kind: 'RETURNED',
+      title: 'Book returned',
+      detail: `${book?.title ?? 'Book'} was returned (simulated).`,
+    });
+    return delay(loan);
+  },
+
+  /** Simulated issue: takes a free physical copy and creates a loan for the standard period. */
+  async borrowBook(userId: string, bookId: string) {
+    const student = students.find((s) => s.id === userId);
+    if (!student) return Promise.reject(new Error('Session expired.'));
+    if (student.restricted) {
+      return Promise.reject(new Error('This demo account is restricted and cannot borrow books.'));
+    }
+    if (loans.some((l) => l.userId === userId && l.bookId === bookId && l.status === 'ACTIVE')) {
+      return Promise.reject(new Error('You already have this book issued.'));
+    }
+    const copy = copies.find((c) => c.bookId === bookId && c.status === 'AVAILABLE');
+    if (!copy) return Promise.reject(new Error('No physical copy is free right now. Try reserving it.'));
+    copy.status = 'ON_LOAN';
+    const loan: Loan = {
+      id: nextId('l'),
+      userId,
+      copyId: copy.id,
+      bookId,
+      issuedAt: formatISO(NOW),
+      dueAt: formatISO(addDays(NOW, policy.loanPeriodDays)),
+      status: 'ACTIVE',
+      renewalCount: 0,
+      markedForReturn: false,
+    };
+    loans.push(loan);
+    activities.unshift({
+      id: nextId('a'),
+      userId,
+      at: loan.issuedAt,
+      kind: 'RESERVATION_UPDATE',
+      title: 'Book issued',
+      detail: `${getBook(bookId)?.title ?? 'Book'} issued until ${loan.dueAt.slice(0, 10)} (simulated).`,
+    });
+    return delay(loan);
   },
 
   async register(input: RegisterInput) {
@@ -594,36 +697,37 @@ export const mockApi = {
     return Math.abs(days) * policy.finePerDay;
   },
 
-  filterLoans(
-    userLoans: Loan[],
-    student: { id: string; restricted: boolean },
-    filter: BookFilter,
-    q: string,
-  ): Loan[] {
+  loanMatchesFilter(loan: Loan, filter: BookFilter): boolean {
+    const days = daysRemaining(loan.dueAt);
+    switch (filter) {
+      case 'ISSUED':
+        return loan.status === 'ACTIVE';
+      case 'DUE_SOON':
+        return loan.status === 'ACTIVE' && days >= 0 && days <= policy.approachingMaxDays;
+      case 'OVERDUE':
+        return loan.status === 'ACTIVE' && days < 0;
+      case 'RETURNED':
+        return loan.status === 'RETURNED';
+      default:
+        return true;
+    }
+  },
+
+  filterLoans(userLoans: Loan[], filter: BookFilter, q: string): Loan[] {
     const query = q.trim().toLowerCase();
     return userLoans
-      .filter((loan) => loan.status === 'ACTIVE')
+      .filter((loan) => mockApi.loanMatchesFilter(loan, filter))
       .filter((loan) => {
+        if (!query) return true;
         const book = getBook(loan.bookId);
-        if (query) {
-          const hay = `${book?.title} ${book?.author} ${book?.category}`.toLowerCase();
-          if (!hay.includes(query)) return false;
-        }
-        const result = evaluateEligibility(loan, student);
-        const days = daysRemaining(loan.dueAt);
-        switch (filter) {
-          case 'DUE_SOON':
-            return days >= 0 && days <= policy.approachingMaxDays;
-          case 'OVERDUE':
-            return days < 0;
-          case 'RENEWAL_AVAILABLE':
-            return result.eligible;
-          case 'RENEWAL_UNAVAILABLE':
-            return !result.eligible;
-          default:
-            return true;
-        }
-      });
+        const hay = `${book?.title} ${book?.author} ${book?.category}`.toLowerCase();
+        return hay.includes(query);
+      })
+      .sort((a, b) =>
+        filter === 'RETURNED'
+          ? (b.returnedAt ?? '').localeCompare(a.returnedAt ?? '')
+          : a.dueAt.localeCompare(b.dueAt),
+      );
   },
 
   policy,
