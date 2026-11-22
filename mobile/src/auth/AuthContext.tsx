@@ -1,7 +1,7 @@
 import { createContext, ReactNode, useContext, useMemo, useState } from 'react';
 
 import { mockApi, PublicStudent } from '../api/mockStore';
-import { RegisterInput } from '../domain/types';
+import { ProfilePatch, RegisterInput } from '../domain/types';
 
 interface AuthContextValue {
   user: PublicStudent | null;
@@ -9,6 +9,7 @@ interface AuthContextValue {
   register: (input: RegisterInput) => Promise<void>;
   logout: () => void;
   refresh: () => Promise<void>;
+  updateProfile: (patch: ProfilePatch) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -33,6 +34,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       async refresh() {
         if (!user) return;
         const next = await mockApi.me(user.id);
+        setUser(next);
+      },
+      async updateProfile(patch) {
+        if (!user) return;
+        const next = await mockApi.updateProfile(user.id, patch);
         setUser(next);
       },
     }),

@@ -1,16 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, View } from 'react-native';
 
 import { getBook, mockApi } from '@/src/api/mockStore';
 import { useAuth } from '@/src/auth/AuthContext';
 import { AppText, Badge, BookCover, DemoBanner, EmptyState, ErrorBlock, LoadingBlock } from '@/src/components/ui';
-import { colors, radius, spacing } from '@/src/theme/tokens';
+import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
+import { radius, spacing } from '@/src/theme/tokens';
 
 export default function AlternativesScreen() {
   const { bookId } = useLocalSearchParams<{ bookId: string }>();
   const { user } = useAuth();
   const router = useRouter();
+  const { colors } = useTheme();
+  const styles = useStyles();
   const source = bookId ? getBook(bookId) : undefined;
   const query = useQuery({
     queryKey: ['alternatives', user?.id, bookId],
@@ -24,12 +27,11 @@ export default function AlternativesScreen() {
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.content}>
-      <DemoBanner />
-      <AppText variant="title">Related resources</AppText>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <AppText variant="title">Similar books</AppText>
       <AppText variant="caption">
-        Alternatives to {source?.title ?? 'this title'}. Ranking in Phase 1 uses topic/course overlap only
-        (metadata stand-in). TF-IDF and embeddings are not implemented yet.
+        Alternatives to {source?.title ?? 'this title'}, ranked by topic and course overlap. Books you can get
+        right now are listed first.
       </AppText>
       {(query.data ?? []).length === 0 ? (
         <EmptyState title="No alternatives" body="The demo catalogue has no overlapping topics for this title." />
@@ -42,51 +44,54 @@ export default function AlternativesScreen() {
             <Pressable
               key={row.bookId}
               onPress={() => router.push(`/catalogue/${book.id}`)}
-              style={styles.card}>
+              style={({ pressed }) => [styles.card, { opacity: pressed ? 0.85 : 1 }]}>
               <View style={{ flexDirection: 'row', gap: spacing.md }}>
-                <BookCover title={book.title} />
+                <BookCover title={book.title} seed={book.category + book.id} />
                 <View style={{ flex: 1, gap: 4 }}>
                   <AppText variant="bodyStrong">{book.title}</AppText>
                   <AppText variant="caption">{book.author}</AppText>
-                  <Badge
-                    label={
-                      row.availablePhysical > 0
-                        ? `${row.availablePhysical} physical available`
-                        : row.digitalAccessible
-                          ? 'Digital demo record'
-                          : 'Not currently accessible'
-                    }
-                    fg={accessible ? colors.success : colors.textSecondary}
-                    bg={accessible ? colors.successMuted : colors.surfaceMuted}
-                  />
-                  <AppText variant="label">{book.resourceType}</AppText>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+                    <Badge
+                      label={
+                        row.availablePhysical > 0
+                          ? `${row.availablePhysical} available`
+                          : row.digitalAccessible
+                            ? 'Digital copy'
+                            : 'Checked out'
+                      }
+                      fg={accessible ? colors.success : colors.danger}
+                      bg={accessible ? colors.successMuted : colors.dangerMuted}
+                    />
+                    <Badge label={`${Math.round(row.score * 100)}% match`} fg={colors.accent} bg={colors.accentMuted} />
+                  </View>
                 </View>
               </View>
-              <AppText variant="bodyStrong">Why</AppText>
+              <AppText variant="label" style={{ color: colors.pink }}>
+                WHY THIS BOOK
+              </AppText>
               {row.reasons.map((reason) => (
                 <AppText key={reason} variant="caption">
-                  · {reason}
+                  • {reason}
                 </AppText>
               ))}
-              {row.matchingTopics.length > 0 ? (
-                <AppText variant="caption">Matching topics: {row.matchingTopics.join(', ')}</AppText>
-              ) : null}
             </Pressable>
           );
         })
       )}
+      <DemoBanner />
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((c) => ({
+  screen: { flex: 1, backgroundColor: c.background },
   content: { padding: spacing.lg, gap: spacing.md, paddingBottom: spacing.xxl },
   card: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
+    backgroundColor: c.surface,
+    borderRadius: radius.lg,
     padding: spacing.md,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: c.border,
     gap: spacing.sm,
   },
-});
+}));

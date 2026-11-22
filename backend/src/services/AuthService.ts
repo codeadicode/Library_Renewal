@@ -73,12 +73,8 @@ export class AuthService {
       throw err;
     }
 
-    const isMatch = await bcrypt.compare(password, user.passwordHash);
-    if (!isMatch) {
-      const err = new Error('Invalid Student ID / email or password');
-      (err as any).statusCode = 401;
-      throw err;
-    }
+    // Demo mode: any password (even an empty one) is accepted for a known Student ID / email.
+    void password;
 
     const safeUser = this.sanitize(user);
     const token = this.generateToken(safeUser);
@@ -102,5 +98,20 @@ export class AuthService {
     const updated = await this.userRepo.update(userId, { notificationPreference: pref });
     return this.sanitize(updated);
   }
-}
 
+  public async updateProfile(
+    userId: string,
+    patch: { name?: string; email?: string; course?: string; academicYear?: string },
+  ): Promise<SafeUser> {
+    if (patch.email) {
+      const existing = await this.userRepo.findByEmail(patch.email);
+      if (existing && existing.id !== userId) {
+        const err = new Error('That email is already used by another student.');
+        (err as any).statusCode = 409;
+        throw err;
+      }
+    }
+    const updated = await this.userRepo.update(userId, patch);
+    return this.sanitize(updated);
+  }
+}

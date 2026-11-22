@@ -39,15 +39,19 @@ Library_Renewal/
 
 The system comes pre-seeded with 5 realistic student accounts and 25 academic textbooks:
 
-| Student ID | Password | Name | Scenario Demonstrated |
-| :--- | :--- | :--- | :--- |
-| `STU1001` | `demo1234` | Maya Rao | Mixed loans: renewable DBMS book (+14 days), OS book blocked by active reservation, on-track Networks book. |
-| `STU1002` | `demo1234` | Arjun Mehta | Approaching due date, renewal blocked by reservation, alternative resource discovery. |
-| `STU1003` | `demo1234` | Leila Khan | Maximum renewals reached (2/2 allowed by policy). |
-| `STU1004` | `demo1234` | Dev Nair | Restricted demo account (`ACCOUNT_RESTRICTED`). |
-| `STU1005` | `demo1234` | Priya Sharma | Overdue loan (`LOAN_OVERDUE`), return workflow, and simulated fine calculation (₹5/day). |
+**Any password works** (or none) — sign-in only checks the Student ID / email. The login screen also has one-tap buttons for each account.
 
-*(Email logins like `maya@campus.demo` are also accepted).*
+| Student ID | Name | Scenario Demonstrated |
+| :--- | :--- | :--- |
+| `1RZ25CS003` | Aadya Dhuri | Two issued books (one due in 3 days), returned-book history, active reservation on the OS book. |
+| `1RV25CS013` | Akash Tiwari | Mixed loans: renewable DBMS book, OS book blocked by an active reservation, on-track Networks book. |
+| `1RV25EC045` | Leila Khan | Maximum renewals reached (2/2 allowed by policy). |
+| `1RV25EC078` | Dev Nair | Restricted demo account (`ACCOUNT_RESTRICTED`). |
+| `1RV25EC092` | Priya Sharma | Overdue loan (`LOAN_OVERDUE`), return workflow, and simulated fine calculation (₹5/day). |
+
+App features: My Books tabs (Issued / Due / Overdue / Returned), Library catalogue showing available books with borrow/reserve, edit profile, and a Light / Dark / System theme switch (Profile → Appearance).
+
+*(Email logins like `aadya@campus.demo` are also accepted).*
 
 ---
 

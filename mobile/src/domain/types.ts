@@ -25,12 +25,14 @@ export type ReasonCode =
 
 export type SuggestedAction = 'RENEW' | 'FIND_ALTERNATIVE' | 'RETURN' | 'NONE';
 
-export type BookFilter =
-  | 'ALL'
-  | 'DUE_SOON'
-  | 'OVERDUE'
-  | 'RENEWAL_AVAILABLE'
-  | 'RENEWAL_UNAVAILABLE';
+export type BookFilter = 'ISSUED' | 'DUE_SOON' | 'OVERDUE' | 'RETURNED';
+
+export interface ProfilePatch {
+  name?: string;
+  email?: string;
+  course?: string;
+  academicYear?: string;
+}
 
 export interface LibraryPolicy {
   id: string;

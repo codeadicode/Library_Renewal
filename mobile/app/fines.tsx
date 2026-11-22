@@ -1,14 +1,17 @@
 import { useQuery } from '@tanstack/react-query';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { ScrollView, Text, View } from 'react-native';
 
 import { mockApi } from '@/src/api/mockStore';
 import { useAuth } from '@/src/auth/AuthContext';
-import { AppText, DemoBanner, EmptyState, LoadingBlock } from '@/src/components/ui';
+import { AppText, Card, DemoBanner, EmptyState, LoadingBlock } from '@/src/components/ui';
 import { formatDate } from '@/src/domain/loanDisplay';
-import { colors, radius, spacing } from '@/src/theme/tokens';
+import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
+import { radius, spacing } from '@/src/theme/tokens';
 
 export default function FinesScreen() {
   const { user } = useAuth();
+  const { colors } = useTheme();
+  const styles = useStyles();
   const query = useQuery({
     queryKey: ['fines', user?.id],
     queryFn: () => mockApi.listFines(user!.id),
@@ -20,35 +23,36 @@ export default function FinesScreen() {
   const total = rows.reduce((sum, f) => sum + f.amount, 0);
 
   return (
-    <ScrollView contentContainerStyle={styles.content}>
-      <DemoBanner />
-      <AppText variant="title">₹{total}</AppText>
-      <AppText variant="caption">
-        Simulated balance. No payments. Demo rate ₹{mockApi.policy.finePerDay} per overdue day.
-      </AppText>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <View style={[styles.total, { backgroundColor: total > 0 ? colors.danger : colors.success }]}>
+        <Text style={styles.totalLabel}>{total > 0 ? 'Outstanding (demo)' : 'No fines'}</Text>
+        <Text style={styles.totalValue}>₹{total}</Text>
+        <Text style={styles.totalLabel}>₹{mockApi.policy.finePerDay} per overdue day · no real payments</Text>
+      </View>
       {rows.length === 0 ? (
-        <EmptyState title="No fine rows" body="This demo account has no ledger entries." />
+        <EmptyState title="All clear" body="You have no fines on this account." />
       ) : (
         rows.map((row) => (
-          <View key={row.id} style={styles.card}>
-            <AppText variant="bodyStrong">₹{row.amount}</AppText>
+          <Card key={row.id} style={{ gap: 4 }}>
+            <AppText variant="heading" style={{ color: colors.danger }}>
+              ₹{row.amount}
+            </AppText>
             <AppText variant="caption">{row.reason}</AppText>
-            <AppText variant="label">{formatDate(row.at)} · simulated</AppText>
-          </View>
+            <AppText variant="label" style={{ color: colors.textMuted }}>
+              {formatDate(row.at)}
+            </AppText>
+          </Card>
         ))
       )}
+      <DemoBanner />
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((c) => ({
+  screen: { flex: 1, backgroundColor: c.background },
   content: { padding: spacing.lg, gap: spacing.md },
-  card: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    gap: 4,
-  },
-});
+  total: { borderRadius: radius.lg, padding: spacing.xl, alignItems: 'center', gap: 4 },
+  totalValue: { color: '#FFFFFF', fontSize: 40, fontWeight: '800' },
+  totalLabel: { color: 'rgba(255,255,255,0.9)', fontSize: 13, fontWeight: '600', textAlign: 'center' },
+}));
