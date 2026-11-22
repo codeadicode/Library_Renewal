@@ -4,14 +4,14 @@ export const registerSchema = z.object({
   studentId: z.string().min(3).max(30),
   name: z.string().min(2).max(100),
   email: z.string().email(),
-  password: z.string().optional().default(''),
+  password: z.string().min(8, 'Password must be at least 8 characters').max(128),
   course: z.string().min(2),
   academicYear: z.string().min(1),
 });
 
 export const loginSchema = z.object({
-  identifier: z.string().min(1, 'Student ID or email is required'),
-  password: z.string().optional().default(''),
+  identifier: z.string().trim().min(1, 'Student ID or email is required'),
+  password: z.string().min(1, 'Password is required').max(128),
 });
 
 export const decisionSchema = z.object({

@@ -1,14 +1,14 @@
-import { IBookRepository, IReservationRepository } from '../repositories/interfaces';
+import { DataStore } from '../repositories/interfaces';
 import { Book, BookCopy, Course, Reservation, Topic } from '../types';
+import { conflict, notFound } from '../lib/errors';
+
+const isDigitallyAccessible = (b: Book) => Boolean(b.digitalUrl && b.digitalUrl.startsWith('http'));
 
 export class BookService {
-  constructor(
-    private bookRepo: IBookRepository,
-    private reservationRepo: IReservationRepository,
-  ) {}
+  constructor(private store: DataStore) {}
 
-  public async getAllBooks(): Promise<Book[]> {
-    return this.bookRepo.findAll();
+  public getAllBooks(): Promise<Book[]> {
+    return this.store.repos.books.findAll();
   }
 
   public async searchBooks(query: {
@@ -18,23 +18,19 @@ export class BookService {
     type?: string;
     available?: boolean;
   }): Promise<{ books: Book[]; availableCounts: Record<string, number> }> {
-    let list = await this.bookRepo.search(query);
-    const availableCountsMap = await this.bookRepo.countAllAvailablePhysical();
+    const { books } = this.store.repos;
+    let list = await books.search(query);
+    const availableCountsMap = await books.countAllAvailablePhysical();
 
     if (query.available !== undefined) {
       list = list.filter((b) => {
-        const physicalFree = (availableCountsMap.get(b.id) || 0) > 0;
-        const digitalFree = Boolean(b.digitalUrl && b.digitalUrl.startsWith('http'));
-        const accessible = physicalFree || digitalFree;
+        const accessible = (availableCountsMap.get(b.id) || 0) > 0 || isDigitallyAccessible(b);
         return query.available ? accessible : !accessible;
       });
     }
 
     const availableCounts: Record<string, number> = {};
-    for (const b of list) {
-      availableCounts[b.id] = availableCountsMap.get(b.id) || 0;
-    }
-
+    for (const b of list) availableCounts[b.id] = availableCountsMap.get(b.id) || 0;
     return { books: list, availableCounts };
   }
 
@@ -42,63 +38,59 @@ export class BookService {
     book: Book;
     copies: BookCopy[];
     availablePhysical: number;
+    digitalAccessible: boolean;
+    activeReservations: number;
     topics: Topic[];
     courses: Course[];
   }> {
-    const book = await this.bookRepo.findById(id);
-    if (!book) {
-      const err = new Error('Book not found in catalogue');
-      (err as any).statusCode = 404;
-      throw err;
-    }
+    const { books, reservations } = this.store.repos;
+    const book = await books.findById(id);
+    if (!book) throw notFound('Book not found in catalogue');
 
-    const [copies, allTopics, allCourses] = await Promise.all([
-      this.bookRepo.findCopiesByBookId(id),
-      this.bookRepo.findTopics(),
-      this.bookRepo.findCourses(),
+    const [copies, allTopics, allCourses, holds] = await Promise.all([
+      books.findCopiesByBookId(id),
+      books.findTopics(),
+      books.findCourses(),
+      reservations.findActiveByBookId(id),
     ]);
-
-    const availablePhysical = copies.filter((c) => c.status === 'AVAILABLE').length;
-    const topics = allTopics.filter((t) => book.topicIds.includes(t.id));
-    const courses = allCourses.filter((c) => book.courseIds.includes(c.id));
 
     return {
       book,
       copies,
-      availablePhysical,
-      topics,
-      courses,
+      availablePhysical: copies.filter((c) => c.status === 'AVAILABLE').length,
+      digitalAccessible: isDigitallyAccessible(book),
+      activeReservations: holds.length,
+      topics: allTopics.filter((t) => book.topicIds.includes(t.id)),
+      courses: allCourses.filter((c) => book.courseIds.includes(c.id)),
     };
   }
 
-  public async reserveBook(bookId: string, userId: string): Promise<Reservation> {
-    const book = await this.bookRepo.findById(bookId);
-    if (!book) {
-      const err = new Error('Book not found');
-      (err as any).statusCode = 404;
-      throw err;
-    }
+  public async reserveBook(bookId: string, userId: string): Promise<{ reservation: Reservation; created: boolean }> {
+    return this.store.transaction(async (tx) => {
+      const book = await tx.books.findById(bookId);
+      if (!book) throw notFound('Book not found');
 
-    // Check if user already has an active reservation
-    const existing = await this.reservationRepo.findByUserId(userId);
-    const alreadyReserved = existing.find((r) => r.bookId === bookId && r.status === 'ACTIVE');
-    if (alreadyReserved) {
-      return alreadyReserved;
-    }
+      const myLoans = await tx.loans.findByUserId(userId);
+      if (myLoans.some((l) => l.bookId === bookId && l.status !== 'RETURNED')) {
+        throw conflict('You already have this book issued.', 'ALREADY_BORROWED');
+      }
 
-    return this.reservationRepo.create({
-      bookId,
-      userId,
-      status: 'ACTIVE',
+      const existing = (await tx.reservations.findByUserId(userId)).find(
+        (r) => r.bookId === bookId && r.status === 'ACTIVE',
+      );
+      if (existing) return { reservation: existing, created: false };
+
+      // A partial unique index also guards this in PostgreSQL against racing requests.
+      const reservation = await tx.reservations.create({ bookId, userId, status: 'ACTIVE' });
+      return { reservation, created: true };
     });
   }
 
-  public async getTopics(): Promise<Topic[]> {
-    return this.bookRepo.findTopics();
+  public getTopics(): Promise<Topic[]> {
+    return this.store.repos.books.findTopics();
   }
 
-  public async getCourses(): Promise<Course[]> {
-    return this.bookRepo.findCourses();
+  public getCourses(): Promise<Course[]> {
+    return this.store.repos.books.findCourses();
   }
 }
-

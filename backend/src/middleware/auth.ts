@@ -1,32 +1,25 @@
-import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import { config } from '../config';
-import { SafeUser } from '../types';
+import { Request, Response, NextFunction, RequestHandler } from 'express';
+import { AuthService } from '../services/AuthService';
 
 export interface AuthenticatedRequest extends Request {
-  user?: SafeUser;
+  /** Identity from the verified JWT. Profile data is always loaded from the database. */
+  user?: { id: string; studentId: string };
 }
 
-export function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({
-      error: 'UNAUTHORIZED',
-      message: 'Authentication token missing or invalid',
-    });
-    return;
-  }
+export function createAuthMiddleware(authService: AuthService): RequestHandler {
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Authentication token missing or invalid' });
+      return;
+    }
 
-  const token = authHeader.split(' ')[1];
-  try {
-    const decoded = jwt.verify(token, config.jwtSecret) as SafeUser;
-    req.user = decoded;
-    next();
-  } catch (err) {
-    res.status(401).json({
-      error: 'UNAUTHORIZED',
-      message: 'Invalid or expired authentication token',
-    });
-  }
+    try {
+      const claims = authService.verifyToken(authHeader.slice('Bearer '.length).trim());
+      req.user = { id: claims.sub, studentId: claims.studentId };
+      next();
+    } catch {
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Invalid or expired authentication token' });
+    }
+  };
 }
-

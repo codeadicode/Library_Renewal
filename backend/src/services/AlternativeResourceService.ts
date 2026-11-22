@@ -1,68 +1,49 @@
 import { RecommendationEngine } from '../recommendation/engine';
-import {
-  IAcademicNeedRepository,
-  IBookRepository,
-  IPolicyRepository,
-} from '../repositories/interfaces';
+import { DataStore } from '../repositories/interfaces';
 import { AlternativeRecommendation, Book, Course, Topic } from '../types';
+import { now } from '../lib/clock';
+import { notFound } from '../lib/errors';
+import { isActiveNeed } from './academicPlanning';
 
 export class AlternativeResourceService {
-  private engine: RecommendationEngine;
+  private engine = new RecommendationEngine();
 
-  constructor(
-    private bookRepo: IBookRepository,
-    private academicNeedRepo: IAcademicNeedRepository,
-    private policyRepo: IPolicyRepository,
-  ) {
-    this.engine = new RecommendationEngine();
-  }
+  constructor(private store: DataStore) {}
 
   public async findAlternativesForBook(
     bookId: string,
     authenticatedUserId: string,
-  ): Promise<{
-    sourceBook: Book;
-    recommendations: AlternativeRecommendation[];
-  }> {
-    const sourceBook = await this.bookRepo.findById(bookId);
-    if (!sourceBook) {
-      const err = new Error('Source book not found');
-      (err as any).statusCode = 404;
-      throw err;
-    }
+  ): Promise<{ sourceBook: Book; recommendations: AlternativeRecommendation[] }> {
+    const { repos } = this.store;
+    const sourceBook = await repos.books.findById(bookId);
+    if (!sourceBook) throw notFound('Source book not found');
 
-    const [allBooks, allTopics, allCourses, academicNeeds, availableCounts, policy] =
-      await Promise.all([
-        this.bookRepo.findAll(),
-        this.bookRepo.findTopics(),
-        this.bookRepo.findCourses(),
-        this.academicNeedRepo.findByUserId(authenticatedUserId),
-        this.bookRepo.countAllAvailablePhysical(),
-        this.policyRepo.getDefaultPolicy(),
-      ]);
+    const [allBooks, allTopics, allCourses, academicNeeds, availableCounts, policy] = await Promise.all([
+      repos.books.findAll(),
+      repos.books.findTopics(),
+      repos.books.findCourses(),
+      repos.academicNeeds.findByUserId(authenticatedUserId),
+      repos.books.countAllAvailablePhysical(),
+      repos.policy.getDefaultPolicy(),
+    ]);
 
-    const topicLookup = new Map<string, Topic>();
-    allTopics.forEach((t) => topicLookup.set(t.id, t));
+    const topicLookup = new Map<string, Topic>(allTopics.map((t) => [t.id, t]));
+    const courseLookup = new Map<string, Course>(allCourses.map((c) => [c.id, c]));
+    const at = now();
 
-    const courseLookup = new Map<string, Course>();
-    allCourses.forEach((c) => courseLookup.set(c.id, c));
-
-    // Index catalogue and rank alternatives
     this.engine.indexCatalogue(allBooks, topicLookup, courseLookup);
     const recommendations = this.engine.rankAlternatives({
       sourceBook,
       candidates: allBooks,
-      academicNeeds,
+      // Needs whose needed-until date has passed no longer influence ranking.
+      academicNeeds: academicNeeds.filter((n) => isActiveNeed(n, at)),
       topicLookup,
       courseLookup,
       availablePhysicalCounts: availableCounts,
       policy,
+      at,
     });
 
-    return {
-      sourceBook,
-      recommendations,
-    };
+    return { sourceBook, recommendations };
   }
 }
-

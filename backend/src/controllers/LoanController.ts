@@ -38,5 +38,22 @@ export class LoanController {
       next(err);
     }
   };
-}
 
+  public returnLoan = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const result = await this.loanService.returnLoan(req.params.id, req.user!.id);
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  public borrowBook = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const loan = await this.loanService.borrowBook(req.params.id, req.user!.id);
+      res.status(201).json(loan);
+    } catch (err) {
+      next(err);
+    }
+  };
+}

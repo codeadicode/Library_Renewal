@@ -1,0 +1,22 @@
+# Local PostgreSQL for the LibTrack backend.
+#   docker compose up -d db
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: libtrack-postgres
+    environment:
+      POSTGRES_USER: libtrack
+      POSTGRES_PASSWORD: libtrack
+      POSTGRES_DB: libtrack
+    ports:
+      - "5432:5432"
+    volumes:
+      - libtrack-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U libtrack -d libtrack"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  libtrack-pgdata:

@@ -1,86 +1,122 @@
 import { differenceInCalendarDays } from 'date-fns';
-import {
-  IFineRepository,
-  ILoanRepository,
-  IPolicyRepository,
-} from '../repositories/interfaces';
-import { FineLedger, Loan } from '../types';
+import { DataStore } from '../repositories/interfaces';
+import { FineLedger } from '../types';
+import { now } from '../lib/clock';
+import { forbidden, notFound } from '../lib/errors';
+import { formatRupees, multiplyMoney, sumMoney } from '../lib/money';
+
+export interface FineEstimate {
+  loanId: string;
+  bookId: string;
+  bookTitle: string;
+  daysOverdue: number;
+  estimatedFine: number;
+}
+
+export interface FineSummary {
+  currency: 'INR';
+  dailyRate: number;
+  /** Charges actually recorded in the fine ledger (owed). */
+  ledger: { total: number; entries: FineLedger[] };
+  /**
+   * What open overdue loans *would* cost if returned today. Not owed yet and
+   * never added to the ledger total.
+   */
+  estimates: { total: number; loans: FineEstimate[] };
+
+  /** @deprecated use ledger.total */
+  currentBalance: number;
+  /** @deprecated use ledger.entries */
+  fineHistory: FineLedger[];
+  /** @deprecated use estimates.loans */
+  activeOverdueFines: Array<{ loanId: string; daysOverdue: number; estimatedFine: number }>;
+}
 
 export class FineService {
-  constructor(
-    private fineRepo: IFineRepository,
-    private loanRepo: ILoanRepository,
-    private policyRepo: IPolicyRepository,
-  ) {}
+  constructor(private store: DataStore) {}
 
-  public async getUserFines(userId: string): Promise<{
-    currentBalance: number;
-    dailyRate: number;
-    fineHistory: FineLedger[];
-    activeOverdueFines: Array<{
-      loanId: string;
-      daysOverdue: number;
-      estimatedFine: number;
-    }>;
-  }> {
-    const [fines, loans, policy] = await Promise.all([
-      this.fineRepo.findByUserId(userId),
-      this.loanRepo.findByUserId(userId),
-      this.policyRepo.getDefaultPolicy(),
+  public async getUserFines(userId: string): Promise<FineSummary> {
+    const { repos } = this.store;
+    const [entries, loans, policy] = await Promise.all([
+      repos.fines.findByUserId(userId),
+      repos.loans.findByUserId(userId),
+      repos.policy.getDefaultPolicy(),
     ]);
 
-    const currentBalance = fines.reduce((sum, f) => sum + f.amount, 0);
-    const now = new Date();
-
-    const activeOverdueFines: Array<{
-      loanId: string;
-      daysOverdue: number;
-      estimatedFine: number;
-    }> = [];
-
+    const at = now();
+    const estimates: FineEstimate[] = [];
     for (const loan of loans) {
-      if (loan.status === 'OVERDUE' || loan.status === 'ACTIVE') {
-        const days = differenceInCalendarDays(new Date(loan.dueAt), now);
-        if (days < 0) {
-          const daysOverdue = Math.abs(days);
-          activeOverdueFines.push({
-            loanId: loan.id,
-            daysOverdue,
-            estimatedFine: daysOverdue * policy.finePerDay,
-          });
-        }
-      }
+      if (loan.status === 'RETURNED') continue;
+      const daysOverdue = differenceInCalendarDays(at, new Date(loan.dueAt));
+      if (daysOverdue <= 0) continue;
+      const book = await repos.books.findById(loan.bookId);
+      estimates.push({
+        loanId: loan.id,
+        bookId: loan.bookId,
+        bookTitle: book?.title ?? 'Unknown title',
+        daysOverdue,
+        estimatedFine: multiplyMoney(policy.finePerDay, daysOverdue),
+      });
     }
 
+    const ledgerTotal = sumMoney(entries.map((e) => e.amount));
     return {
-      currentBalance,
+      currency: 'INR',
       dailyRate: policy.finePerDay,
-      fineHistory: fines,
-      activeOverdueFines,
+      ledger: { total: ledgerTotal, entries },
+      estimates: { total: sumMoney(estimates.map((e) => e.estimatedFine)), loans: estimates },
+      currentBalance: ledgerTotal,
+      fineHistory: entries,
+      activeOverdueFines: estimates.map(({ loanId, daysOverdue, estimatedFine }) => ({ loanId, daysOverdue, estimatedFine })),
     };
   }
 
-  public async estimateLateFine(loanId: string, returnDate?: Date): Promise<{
+  /** Estimate for one of *the caller's own* loans. */
+  public async estimateLateFine(
+    loanId: string,
+    userId: string,
+    returnDate: Date = now(),
+  ): Promise<{
+    loanId: string;
     daysLate: number;
     estimatedAmount: number;
     dailyRate: number;
+    returned: boolean;
+    recordedAmount: number;
     calculation: string;
   }> {
-    const loan = await this.loanRepo.findById(loanId);
-    if (!loan) throw new Error('Loan not found');
-    const policy = await this.policyRepo.getDefaultPolicy();
+    const { repos } = this.store;
+    const loan = await repos.loans.findById(loanId);
+    if (!loan) throw notFound('Loan not found');
+    if (loan.userId !== userId) throw forbidden('Forbidden: You do not own this loan');
 
-    const compareDate = returnDate || new Date();
-    const daysDiff = differenceInCalendarDays(compareDate, new Date(loan.dueAt));
-    const daysLate = Math.max(0, daysDiff);
-    const estimatedAmount = daysLate * policy.finePerDay;
+    const [policy, recorded] = await Promise.all([repos.policy.getDefaultPolicy(), repos.fines.findByLoanId(loanId)]);
+    const recordedAmount = sumMoney(recorded.map((f) => f.amount));
 
+    if (loan.status === 'RETURNED') {
+      return {
+        loanId,
+        daysLate: 0,
+        estimatedAmount: 0,
+        dailyRate: policy.finePerDay,
+        returned: true,
+        recordedAmount,
+        calculation: recordedAmount > 0
+          ? `Returned. ${formatRupees(recordedAmount)} is recorded in the fine ledger.`
+          : 'Returned on time. Nothing is owed.',
+      };
+    }
+
+    const daysLate = Math.max(0, differenceInCalendarDays(returnDate, new Date(loan.dueAt)));
+    const estimatedAmount = multiplyMoney(policy.finePerDay, daysLate);
     return {
+      loanId,
       daysLate,
       estimatedAmount,
       dailyRate: policy.finePerDay,
-      calculation: `${daysLate} overdue days × ₹${policy.finePerDay}/day = ₹${estimatedAmount}`,
+      returned: false,
+      recordedAmount,
+      calculation: `${daysLate} overdue day${daysLate === 1 ? '' : 's'} × ${formatRupees(policy.finePerDay)}/day = ${formatRupees(estimatedAmount)} (estimate)`,
     };
   }
 }
-

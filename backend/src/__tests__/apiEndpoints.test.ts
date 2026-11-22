@@ -1,9 +1,19 @@
 import request from 'supertest';
 import { createApp } from '../index';
+import { MemoryDataStore, MemoryStore } from '../repositories/memoryStore';
+import { setClockOverride } from '../lib/clock';
+
+const ANCHOR = new Date('2026-11-21T06:30:00Z');
+setClockOverride(ANCHOR);
+
+const login = (app: ReturnType<typeof createApp>, identifier: string, password = 'demo1234') =>
+  request(app).post('/api/auth/login').send({ identifier, password });
 
 describe('LibTrack REST API Endpoints', () => {
-  const app = createApp();
+  const app = createApp(new MemoryDataStore(new MemoryStore(ANCHOR)));
   let akashToken: string;
+
+  afterAll(() => setClockOverride(null));
 
   beforeAll(async () => {
     // Login as Akash Tiwari (1RV25CS013)
@@ -30,23 +40,52 @@ describe('LibTrack REST API Endpoints', () => {
     expect(res.body.name).toBe('Akash Tiwari');
   });
 
-  test('POST /api/auth/login accepts any password for a known student', async () => {
-    const wrong = await request(app)
-      .post('/api/auth/login')
-      .send({ identifier: '1RZ25CS003', password: 'anything-at-all' });
-    expect(wrong.status).toBe(200);
-    expect(wrong.body.user.name).toBe('Aadya Dhuri');
+  test('POST /api/auth/login requires the correct password', async () => {
+    const ok = await login(app, 'aadya@campus.demo');
+    expect(ok.status).toBe(200);
+    expect(ok.body.user.name).toBe('Aadya Dhuri');
+    expect(ok.body.user.passwordHash).toBeUndefined();
+
+    const wrong = await login(app, '1RZ25CS003', 'anything-at-all');
+    expect(wrong.status).toBe(401);
 
     const none = await request(app).post('/api/auth/login').send({ identifier: 'aadya@campus.demo' });
-    expect(none.status).toBe(200);
+    expect(none.status).toBe(400);
 
-    const unknown = await request(app).post('/api/auth/login').send({ identifier: 'NOPE999', password: 'x' });
+    const empty = await login(app, 'aadya@campus.demo', '');
+    expect(empty.status).toBe(400);
+
+    const unknown = await login(app, 'NOPE999', 'x');
     expect(unknown.status).toBe(401);
+    expect(unknown.body.message).toBe(wrong.body.message);
+  });
+
+  test('JWT carries identifiers only, not the profile', async () => {
+    const res = await login(app, '1RV25CS013');
+    const payload = JSON.parse(Buffer.from(res.body.token.split('.')[1], 'base64url').toString());
+    expect(payload.sub).toBe('u-akash');
+    expect(payload.restricted).toBeUndefined();
+    expect(payload.email).toBeUndefined();
+  });
+
+  test('POST /api/auth/register rejects short passwords and stores a hash', async () => {
+    const base = { studentId: 'NEW001', name: 'New Student', course: 'CSE', academicYear: 'Year 1' };
+    const weak = await request(app)
+      .post('/api/auth/register')
+      .send({ ...base, email: 'new@campus.demo', password: 'short' });
+    expect(weak.status).toBe(400);
+
+    const ok = await request(app)
+      .post('/api/auth/register')
+      .send({ ...base, email: 'New@Campus.demo', password: 'a-strong-password' });
+    expect(ok.status).toBe(201);
+    expect(ok.body.user.email).toBe('new@campus.demo');
+    expect((await login(app, 'NEW001', 'a-strong-password')).status).toBe(200);
+    expect((await login(app, 'NEW001', 'wrong-password')).status).toBe(401);
   });
 
   test('PATCH /api/auth/profile edits the student profile', async () => {
-    const login = await request(app).post('/api/auth/login').send({ identifier: '1RV25EC092' });
-    const token = login.body.token;
+    const token = (await login(app, '1RV25EC092')).body.token;
     const res = await request(app)
       .patch('/api/auth/profile')
       .set('Authorization', `Bearer ${token}`)
@@ -89,7 +128,7 @@ describe('LibTrack REST API Endpoints', () => {
       .set('Authorization', `Bearer ${akashToken}`);
     expect(res.status).toBe(200);
     expect(res.body.eligible).toBe(true);
-    expect(res.body.reason_code).toBe('RENEWAL_SUCCESS');
+    expect(res.body.reason_code).toBe('ELIGIBLE');
   });
 
   test('POST /api/loans/:id/decision saves still-need triage decision', async () => {
@@ -142,6 +181,19 @@ describe('LibTrack REST API Endpoints', () => {
         neededUntil: '2026-12-05',
       });
     expect(createRes.status).toBe(201);
+
+    const auth = { Authorization: 'Bearer ' + akashToken };
+    const past = await request(app)
+      .post('/api/academic-needs')
+      .set(auth)
+      .send({ course: 'CS301', topic: 'SQL', assessmentType: 'EXAM', assessmentDate: '2026-11-01', neededUntil: '2026-11-02' });
+    expect(past.status).toBe(400);
+
+    const inverted = await request(app)
+      .post('/api/academic-needs')
+      .set(auth)
+      .send({ course: 'CS301', topic: 'SQL', assessmentType: 'EXAM', assessmentDate: '2026-12-10', neededUntil: '2026-12-01' });
+    expect(inverted.status).toBe(400);
     const needId = createRes.body.id;
 
     // 2. Read
@@ -164,7 +216,8 @@ describe('LibTrack REST API Endpoints', () => {
       .set('Authorization', `Bearer ${akashToken}`);
     expect(res.status).toBe(200);
     expect(res.body.dailyRate).toBe(5);
-    expect(res.body.currentBalance).toBeGreaterThanOrEqual(0);
+    expect(res.body.ledger.total).toBeGreaterThanOrEqual(0);
+    expect(res.body.estimates.total).toBe(0);
   });
 
   test('GET /api/eval/recommendations runs benchmark evaluation', async () => {
@@ -174,6 +227,9 @@ describe('LibTrack REST API Endpoints', () => {
     expect(res.status).toBe(200);
     expect(res.body.hybridTfIdf.ndcgAt5).toBeGreaterThan(0);
     expect(res.body.hybridTfIdf.averageLatencyMs).toBeLessThan(100);
+    expect(res.body.queryCount).toBe(6);
+    expect(typeof res.body.conclusion).toBe('string');
+    expect(res.body.comparison).toHaveLength(4);
   });
 });
 

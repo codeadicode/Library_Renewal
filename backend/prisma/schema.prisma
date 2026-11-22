@@ -14,10 +14,11 @@ enum CopyStatus {
   MAINTENANCE
 }
 
+// OVERDUE is not stored: it is derived from dueAt every time a loan is read,
+// so it can never disagree with the due date.
 enum LoanStatus {
   ACTIVE
   RETURNED
-  OVERDUE
 }
 
 enum ReservationStatus {
@@ -37,6 +38,13 @@ enum NotificationPreference {
   IMPORTANT
   NORMAL
   QUIET
+}
+
+enum ScheduledNotificationStatus {
+  PENDING
+  SENT
+  CANCELLED
+  SUPPRESSED
 }
 
 enum ResourceType {
@@ -70,6 +78,7 @@ model User {
   reservations           Reservation[]
   academicNeeds          AcademicNeed[]
   notifications          Notification[]
+  scheduledNotifications ScheduledNotification[]
   fines                  FineLedger[]
   recommendationFeedback RecommendationFeedback[]
 }
@@ -90,18 +99,18 @@ model Course {
 }
 
 model Book {
-  id            String        @id @default(uuid())
+  id            String       @id @default(uuid())
   title         String
   author        String
-  isbn          String        @unique
+  isbn          String       @unique
   description   String
   category      String
   academicLevel String
-  resourceType  ResourceType  @default(PHYSICAL)
-  renewable     Boolean       @default(true)
+  resourceType  ResourceType @default(PHYSICAL)
+  renewable     Boolean      @default(true)
   digitalUrl    String?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
   copies          BookCopy[]
   topics          BookTopic[]
@@ -166,11 +175,13 @@ model Loan {
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
-  copy            BookCopy         @relation(fields: [copyId], references: [id])
-  user            User             @relation(fields: [userId], references: [id])
-  book            Book             @relation(fields: [bookId], references: [id])
-  renewalAttempts RenewalAttempt[]
-  fines           FineLedger[]
+  copy                   BookCopy                @relation(fields: [copyId], references: [id])
+  user                   User                    @relation(fields: [userId], references: [id])
+  book                   Book                    @relation(fields: [bookId], references: [id])
+  renewalAttempts        RenewalAttempt[]
+  fines                  FineLedger[]
+  notifications          Notification[]
+  scheduledNotifications ScheduledNotification[]
 
   @@index([userId, status])
   @@index([copyId])
@@ -193,13 +204,13 @@ model Reservation {
 }
 
 model RenewalAttempt {
-  id         String   @id @default(uuid())
+  id         String    @id @default(uuid())
   loanId     String
   eligible   Boolean
   reasonCode String
   reason     String
   newDueAt   DateTime?
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
 
   loan Loan @relation(fields: [loanId], references: [id], onDelete: Cascade)
 
@@ -225,22 +236,47 @@ model AcademicNeed {
 model Notification {
   id        String   @id @default(uuid())
   userId    String
+  loanId    String?
   title     String
   message   String
   kind      String
   read      Boolean  @default(false)
   createdAt DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  loan Loan? @relation(fields: [loanId], references: [id], onDelete: SetNull)
 
   @@index([userId, read])
+  @@index([userId, kind, createdAt])
+}
+
+/// Notifications to be delivered later (NOT_SURE follow-ups, DIGEST batches).
+/// Persisted so a backend restart does not lose scheduled reminders.
+model ScheduledNotification {
+  id        String                      @id @default(uuid())
+  userId    String
+  loanId    String?
+  kind      String
+  title     String
+  message   String
+  sendAt    DateTime
+  status    ScheduledNotificationStatus @default(PENDING)
+  sentAt    DateTime?
+  createdAt DateTime                    @default(now())
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  loan Loan? @relation(fields: [loanId], references: [id], onDelete: Cascade)
+
+  @@index([status, sendAt])
+  @@index([loanId, status])
+  @@index([userId, status])
 }
 
 model FineLedger {
   id        String   @id @default(uuid())
   userId    String
   loanId    String?
-  amount    Float
+  amount    Decimal  @db.Decimal(10, 2)
   reason    String
   createdAt DateTime @default(now())
 
@@ -248,6 +284,7 @@ model FineLedger {
   loan Loan? @relation(fields: [loanId], references: [id], onDelete: SetNull)
 
   @@index([userId])
+  @@index([loanId])
 }
 
 model LibraryPolicy {
@@ -260,7 +297,7 @@ model LibraryPolicy {
   approachingMinDays Int      @default(4)
   approachingMaxDays Int      @default(7)
   urgentMaxDays      Int      @default(3)
-  finePerDay         Float    @default(5.0)
+  finePerDay         Decimal  @default(5.00) @db.Decimal(10, 2)
   weightMetadata     Float    @default(0.40)
   weightTfidf        Float    @default(0.35)
   weightCourse       Float    @default(0.15)

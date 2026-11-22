@@ -35,8 +35,11 @@ export class BookController {
     try {
       const bookId = req.params.id;
       const userId = req.user!.id;
-      const reservation = await this.bookService.reserveBook(bookId, userId);
-      res.status(201).json({ message: 'Simulated hold placed successfully', reservation });
+      const { reservation, created } = await this.bookService.reserveBook(bookId, userId);
+      res.status(created ? 201 : 200).json({
+        message: created ? 'Simulated hold placed successfully' : 'You already hold an active reservation for this title',
+        reservation,
+      });
     } catch (err) {
       next(err);
     }
