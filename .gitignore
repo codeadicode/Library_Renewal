@@ -1,0 +1,55 @@
+node_modules/
+.expo/
+dist/
+web-build/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+.env
+.env.local
+coverage/
+.DS_Store
+*.log
+backend/dist/
+mobile/.expo/
+mobile/ios/
+mobile/android/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+
+# Backend generated files
+backend/dist/
+
+# Coverage
+coverage/
+
+# Native build artifacts
+mobile/ios/
+mobile/android/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Logs and OS files
+*.log
+.DS_Store
+*.tsbuildinfo
+
+# Local AI/editor configuration
+.claude/
