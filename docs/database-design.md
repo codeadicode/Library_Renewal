@@ -1,5 +1,7 @@
 # Database design
 
+> **Status (Nov 2026):** the backend runs on PostgreSQL via Prisma (`backend/prisma/migrations`), the mobile app uses it in API mode with SecureStore sessions, and the in-memory store is only for tests/offline demos. Where this planning document disagrees with the code, the code and the READMEs are authoritative.
+
 PostgreSQL + Prisma. Implemented in **Phase 2**. This document is the target schema so mobile mock types stay aligned.
 
 LibTrack stores **simulated** catalogue, loans, and fines. Demo rows should be labelled as simulated in the product UI.

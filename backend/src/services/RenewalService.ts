@@ -14,6 +14,7 @@ import {
 import { now } from '../lib/clock';
 import { forbidden, notFound } from '../lib/errors';
 import { buildAcademicContext } from './academicPlanning';
+import type { NotificationService } from './NotificationService';
 
 /**
  * Pure renewal rules. Order matters: the first failing rule is reported.
@@ -97,7 +98,10 @@ export function evaluateRenewalRules(input: {
 }
 
 export class RenewalService {
-  constructor(private store: DataStore) {}
+  constructor(
+    private store: DataStore,
+    private notifications?: NotificationService,
+  ) {}
 
   public async evaluateEligibility(
     loanId: string,
@@ -199,6 +203,21 @@ export class RenewalService {
         })}.`,
         newDueAt: newDueDate,
       });
+
+      if (this.notifications) {
+        const book = await tx.books.findById(loan.bookId);
+        await this.notifications.notify(
+          {
+            userId: authenticatedUserId,
+            loanId,
+            kind: 'RENEWAL_SUCCESS',
+            title: 'Book renewed',
+            message: `"${book?.title ?? 'Book'}" is now due ${formatISO(newDueDate, { representation: 'date' })}.`,
+            dedupeWithinMinutes: 0,
+          },
+          tx,
+        );
+      }
 
       return { success: true, eligibility, loan: updatedLoan, attempt };
     });

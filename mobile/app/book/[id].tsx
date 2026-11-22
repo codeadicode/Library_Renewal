@@ -2,10 +2,19 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Alert, ScrollView, Text, View } from 'react-native';
 
-import { evaluateEligibility, getBook, mockApi, topicName } from '@/src/api/mockStore';
+import { api } from '@/src/api';
+import { useCatalogue, usePolicy } from '@/src/api/hooks';
 import { useAuth } from '@/src/auth/AuthContext';
 import { AppText, Badge, BookCover, Card, DemoBanner, ErrorBlock, LoadingBlock, PrimaryButton } from '@/src/components/ui';
-import { daysRemaining, eligibilityTone, formatDate, urgencyLabel, urgencyTone } from '@/src/domain/loanDisplay';
+import {
+  daysRemaining,
+  describeAcademicContext,
+  eligibilityTone,
+  formatDate,
+  formatRupees,
+  urgencyLabel,
+  urgencyTone,
+} from '@/src/domain/loanDisplay';
 import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
 import { coverColor, radius, spacing } from '@/src/theme/tokens';
 
@@ -16,24 +25,33 @@ export default function LoanDetailScreen() {
   const queryClient = useQueryClient();
   const { colors } = useTheme();
   const styles = useStyles();
+  const catalogue = useCatalogue();
+  const policy = usePolicy();
+  const enabled = Boolean(user && id);
 
-  const loanQuery = useQuery({
-    queryKey: ['loan', user?.id, id],
-    queryFn: () => mockApi.getLoan(user!.id, id),
-    enabled: Boolean(user && id),
+  const loanQuery = useQuery({ queryKey: ['loan', user?.id, id], queryFn: () => api.getLoan(user!.id, id), enabled });
+  const eligibilityQuery = useQuery({
+    queryKey: ['eligibility', user?.id, id],
+    queryFn: () => api.eligibility(user!.id, id),
+    enabled,
+  });
+  const fineQuery = useQuery({
+    queryKey: ['fine-estimate', user?.id, id],
+    queryFn: () => api.estimateFine(user!.id, id),
+    enabled,
   });
   const historyQuery = useQuery({
     queryKey: ['renewal-history', user?.id, id],
-    queryFn: () => mockApi.renewalHistory(user!.id, id),
-    enabled: Boolean(user && id),
+    queryFn: () => api.renewalHistory(user!.id, id),
+    enabled,
   });
 
   const renew = useMutation({
-    mutationFn: () => mockApi.renew(user!.id, id),
+    mutationFn: () => api.renew(user!.id, id),
     onSuccess: async (result) => {
       await queryClient.invalidateQueries();
       if (result.ok) {
-        Alert.alert('Renewed', 'New due date saved in this demo session.');
+        Alert.alert('Renewed', `New due date: ${formatDate(result.loan.dueAt)}.`);
       } else {
         Alert.alert('Renewal not completed', result.result.reason);
       }
@@ -42,33 +60,42 @@ export default function LoanDetailScreen() {
   });
 
   const giveBack = useMutation({
-    mutationFn: () => mockApi.returnLoan(user!.id, id),
-    onSuccess: async () => {
+    mutationFn: () => api.returnLoan(user!.id, id),
+    onSuccess: async ({ fine }) => {
       await queryClient.invalidateQueries();
-      Alert.alert('Book returned', 'It now shows under My Books → Returned.');
+      Alert.alert(
+        'Book returned',
+        fine
+          ? `${formatRupees(fine.amount)} was added to your fine ledger. The loan now shows under My Books → Returned.`
+          : 'It now shows under My Books → Returned.',
+      );
     },
     onError: (e: Error) => Alert.alert('Could not return', e.message),
   });
 
-  if (loanQuery.isLoading) return <LoadingBlock />;
-  if (loanQuery.isError) {
-    return <ErrorBlock message={(loanQuery.error as Error).message} onRetry={() => loanQuery.refetch()} />;
+  if (loanQuery.isLoading || eligibilityQuery.isLoading || catalogue.isLoading) return <LoadingBlock />;
+  const failed = loanQuery.isError ? loanQuery : eligibilityQuery.isError ? eligibilityQuery : null;
+  if (failed) {
+    return <ErrorBlock message={(failed.error as Error).message} onRetry={() => failed.refetch()} />;
   }
-  if (!user || !loanQuery.data) return null;
+  if (!user || !loanQuery.data || !eligibilityQuery.data) return null;
 
   const loan = loanQuery.data;
-  const book = getBook(loan.bookId);
-  if (!book) return <ErrorBlock message="Book record missing from demo catalogue." />;
+  const eligibility = eligibilityQuery.data;
+  const book = catalogue.getBook(loan.bookId);
+  if (!book) return <ErrorBlock message="This book is missing from the catalogue." onRetry={() => catalogue.refetch()} />;
 
   const returned = loan.status === 'RETURNED';
-  const eligibility = evaluateEligibility(loan, user);
   const days = daysRemaining(loan.dueAt);
   const urgency = urgencyTone(days, colors);
   const elig = eligibilityTone(eligibility, colors);
-  const estimated = returned ? 0 : mockApi.estimateFine(loan);
+  const estimate = fineQuery.data;
+  const estimated = !returned && estimate ? estimate.estimatedAmount : 0;
+  const ctx = eligibility.academicContext;
 
   function confirmRenew() {
-    Alert.alert('Renew this book?', 'This only updates the demo loan, not a real library record.', [
+    const until = eligibility.projectedDueAt ? ` until ${formatDate(eligibility.projectedDueAt)}` : '';
+    Alert.alert('Renew this book?', `The loan will be extended${until}.`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Renew', onPress: () => renew.mutate() },
     ]);
@@ -77,7 +104,9 @@ export default function LoanDetailScreen() {
   function confirmReturn() {
     Alert.alert(
       'Return this book?',
-      estimated > 0 ? `A demo fine of ₹${estimated} will be recorded.` : 'The loan will move to your returned list.',
+      estimated > 0
+        ? `It is overdue: ${formatRupees(estimated)} will be recorded in your fine ledger.`
+        : 'The loan will move to your returned list.',
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Return', onPress: () => giveBack.mutate() },
@@ -112,10 +141,19 @@ export default function LoanDetailScreen() {
         <Row label="Issued" value={formatDate(loan.issuedAt)} />
         <Row label="Due" value={formatDate(loan.dueAt)} />
         {returned && loan.returnedAt ? <Row label="Returned" value={formatDate(loan.returnedAt)} /> : null}
-        <Row label="Renewals used" value={`${loan.renewalCount} / ${mockApi.policy.maxRenewals}`} />
+        <Row label="Renewals used" value={`${loan.renewalCount} / ${eligibility.maxRenewals ?? policy.maxRenewals}`} />
         <Row label="Copy" value={loan.copyId} />
         <Row label="ISBN" value={book.isbn} />
       </Card>
+
+      {!returned && ctx ? (
+        <Card style={{ backgroundColor: colors.infoMuted, borderWidth: 0 }}>
+          <AppText variant="bodyStrong" style={{ color: colors.info }}>
+            Your academic plan
+          </AppText>
+          <AppText variant="caption">{describeAcademicContext(ctx)}</AppText>
+        </Card>
+      ) : null}
 
       {!returned ? (
         <Card style={{ backgroundColor: eligibility.eligible ? colors.accentMuted : colors.pinkMuted, borderWidth: 0 }}>
@@ -123,18 +161,32 @@ export default function LoanDetailScreen() {
             {eligibility.eligible ? 'You can renew this book' : 'Renewal not possible'}
           </AppText>
           <AppText variant="caption">{eligibility.reason}</AppText>
-          {estimated > 0 ? (
-            <AppText variant="bodyStrong" style={{ color: colors.danger }}>
-              Demo fine if returned today: ₹{estimated} (₹{mockApi.policy.finePerDay}/day)
-            </AppText>
+          {eligibility.projectedDueAt ? (
+            <AppText variant="caption">Renewing moves the due date to {formatDate(eligibility.projectedDueAt)}.</AppText>
           ) : null}
+        </Card>
+      ) : null}
+
+      {estimate && !returned && estimate.estimatedAmount > 0 ? (
+        <Card style={{ borderColor: colors.warning }}>
+          <AppText variant="bodyStrong" style={{ color: colors.warning }}>
+            Estimated fine if returned today: {formatRupees(estimate.estimatedAmount)}
+          </AppText>
+          <AppText variant="caption">{estimate.calculation}. Not owed until the book is returned.</AppText>
+        </Card>
+      ) : null}
+      {estimate && estimate.recordedAmount > 0 ? (
+        <Card style={{ borderColor: colors.danger }}>
+          <AppText variant="bodyStrong" style={{ color: colors.danger }}>
+            Recorded in your fine ledger: {formatRupees(estimate.recordedAmount)}
+          </AppText>
         </Card>
       ) : null}
 
       <AppText variant="body">{book.description}</AppText>
       <View style={styles.badgeRow}>
         {book.topicIds.map((t) => (
-          <Badge key={t} label={topicName(t)} fg={colors.info} bg={colors.infoMuted} />
+          <Badge key={t} label={catalogue.topicName(t)} fg={colors.info} bg={colors.infoMuted} />
         ))}
       </View>
 

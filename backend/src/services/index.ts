@@ -23,7 +23,7 @@ export interface Services {
 
 export function createServices(store: DataStore): Services {
   const notifications = new NotificationService(store);
-  const renewals = new RenewalService(store);
+  const renewals = new RenewalService(store, notifications);
   return {
     store,
     auth: new AuthService(store.repos.users),

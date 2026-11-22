@@ -2,7 +2,8 @@ import { useQuery } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Pressable, ScrollView, View } from 'react-native';
 
-import { getBook, mockApi } from '@/src/api/mockStore';
+import { api } from '@/src/api';
+import { useCatalogue } from '@/src/api/hooks';
 import { useAuth } from '@/src/auth/AuthContext';
 import { AppText, Badge, BookCover, DemoBanner, EmptyState, ErrorBlock, LoadingBlock } from '@/src/components/ui';
 import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
@@ -14,10 +15,11 @@ export default function AlternativesScreen() {
   const router = useRouter();
   const { colors } = useTheme();
   const styles = useStyles();
-  const source = bookId ? getBook(bookId) : undefined;
+  const catalogue = useCatalogue();
+  const source = bookId ? catalogue.getBook(bookId) : undefined;
   const query = useQuery({
     queryKey: ['alternatives', user?.id, bookId],
-    queryFn: () => mockApi.alternatives(user!.id, bookId),
+    queryFn: () => api.alternatives(user!.id, bookId),
     enabled: Boolean(user && bookId),
   });
 
@@ -30,14 +32,14 @@ export default function AlternativesScreen() {
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <AppText variant="title">Similar books</AppText>
       <AppText variant="caption">
-        Alternatives to {source?.title ?? 'this title'}, ranked by topic and course overlap. Books you can get
-        right now are listed first.
+        Alternatives to {source?.title ?? 'this title'}, ranked by topic and course overlap and by your upcoming
+        assessments. Books you can get right now are listed first.
       </AppText>
       {(query.data ?? []).length === 0 ? (
         <EmptyState title="No alternatives" body="The demo catalogue has no overlapping topics for this title." />
       ) : (
         (query.data ?? []).map((row) => {
-          const book = getBook(row.bookId);
+          const book = row.book ?? catalogue.getBook(row.bookId);
           if (!book) return null;
           const accessible = row.availablePhysical > 0 || row.digitalAccessible;
           return (

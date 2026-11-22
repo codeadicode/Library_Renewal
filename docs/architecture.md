@@ -1,5 +1,7 @@
 # LibTrack Architecture
 
+> **Status (Nov 2026):** the backend runs on PostgreSQL via Prisma (`backend/prisma/migrations`), the mobile app uses it in API mode with SecureStore sessions, and the in-memory store is only for tests/offline demos. Where this planning document disagrees with the code, the code and the READMEs are authoritative.
+
 LibTrack is a **student-facing** borrowing, renewal, and learning-resource continuity app. It is **not** a library management system: there is no librarian admin, procurement, staff, or acquisitions.
 
 This document is the technical plan. **Phase 1 implements only the mobile foundation** with mock data. Backend services described here are designed now and built in later phases.

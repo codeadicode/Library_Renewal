@@ -1,8 +1,7 @@
 import { Pressable, View } from 'react-native';
 
-import { evaluateEligibility, PublicStudent } from '../api/mockStore';
 import { daysRemaining, eligibilityTone, formatDate, urgencyLabel, urgencyTone } from '../domain/loanDisplay';
-import { Book, Loan } from '../domain/types';
+import { Book, EligibilityResult, Loan } from '../domain/types';
 import { makeStyles, useTheme } from '../theme/ThemeContext';
 import { radius, spacing } from '../theme/tokens';
 import { AppText, Badge, BookCover } from './ui';
@@ -10,12 +9,13 @@ import { AppText, Badge, BookCover } from './ui';
 export function LoanRow({
   loan,
   book,
-  student,
+  eligibility,
   onPress,
 }: {
   loan: Loan;
   book: Book;
-  student: PublicStudent;
+  /** From the backend; omitted while loading or for returned loans. */
+  eligibility?: EligibilityResult;
   onPress: () => void;
 }) {
   const styles = useStyles();
@@ -23,7 +23,7 @@ export function LoanRow({
   const returned = loan.status === 'RETURNED';
   const days = daysRemaining(loan.dueAt);
   const urgency = urgencyTone(days, colors);
-  const elig = eligibilityTone(evaluateEligibility(loan, student), colors);
+  const elig = eligibility ? eligibilityTone(eligibility, colors) : null;
   const stripe = returned ? colors.success : urgency.fg;
 
   return (
@@ -45,7 +45,7 @@ export function LoanRow({
           ) : (
             <>
               <Badge label={urgencyLabel(days)} fg={urgency.fg} bg={urgency.bg} />
-              <Badge label={elig.label} fg={elig.fg} bg={elig.bg} />
+              {elig ? <Badge label={elig.label} fg={elig.fg} bg={elig.bg} /> : null}
               {loan.markedForReturn ? (
                 <Badge label="Marked for return" fg={colors.info} bg={colors.infoMuted} />
               ) : null}

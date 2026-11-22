@@ -3,9 +3,11 @@ import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { FlatList, Pressable, ScrollView, Text, View } from 'react-native';
 
-import { availablePhysicalCount, mockApi } from '@/src/api/mockStore';
+import { api } from '@/src/api';
+import { useCatalogue } from '@/src/api/hooks';
 import { useAuth } from '@/src/auth/AuthContext';
 import { AppText, Badge, BookCover, Chip, EmptyState, ErrorBlock, LoadingBlock, SearchBox } from '@/src/components/ui';
+import { isOpenLoan } from '@/src/domain/loanDisplay';
 import { Book } from '@/src/domain/types';
 import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
 import { coverColor, radius, spacing } from '@/src/theme/tokens';
@@ -25,8 +27,9 @@ export default function LibraryScreen() {
 
   const booksQuery = useQuery({
     queryKey: ['books', q, avail, kind, category],
+    enabled: Boolean(user),
     queryFn: () =>
-      mockApi.listBooks({
+      api.listBooks({
         q,
         available: avail === 'ANY' ? undefined : avail === 'NOW',
         type: kind === 'ANY' ? undefined : kind,
@@ -35,16 +38,18 @@ export default function LibraryScreen() {
   });
   const loansQuery = useQuery({
     queryKey: ['loans', user?.id],
-    queryFn: () => mockApi.listLoans(user!.id),
+    queryFn: () => api.listLoans(user!.id),
     enabled: Boolean(user),
   });
   const issued = new Set(
-    (loansQuery.data ?? []).filter((l) => l.status === 'ACTIVE').map((l) => l.bookId),
+    (loansQuery.data ?? []).filter(isOpenLoan).map((l) => l.bookId),
   );
 
-  const total = mockApi.books.length;
-  const availableNow = mockApi.books.filter((b) => availablePhysicalCount(b.id) > 0 || b.digitalUrl).length;
-  const categories = [...new Set(mockApi.books.map((b) => b.category))];
+  const catalogue = useCatalogue();
+  const total = catalogue.books.length;
+  const availableNow = catalogue.books.filter((b) => catalogue.availableCount(b.id) > 0 || b.digitalUrl).length;
+  const categories = [...new Set(catalogue.books.map((b) => b.category))].sort();
+  const counts = booksQuery.data?.availableCounts ?? {};
 
   const header = (
     <View style={{ gap: spacing.md, paddingBottom: spacing.sm }}>
@@ -94,7 +99,7 @@ export default function LibraryScreen() {
         ))}
       </ScrollView>
       <AppText variant="caption">
-        {booksQuery.data ? `${booksQuery.data.length} result${booksQuery.data.length === 1 ? '' : 's'}` : ' '}
+        {booksQuery.data ? `${booksQuery.data.books.length} result${booksQuery.data.books.length === 1 ? '' : 's'}` : ' '}
       </AppText>
     </View>
   );
@@ -106,7 +111,7 @@ export default function LibraryScreen() {
   return (
     <FlatList
       style={styles.screen}
-      data={booksQuery.data ?? []}
+      data={booksQuery.data?.books ?? []}
       keyExtractor={(item) => item.id}
       numColumns={2}
       columnWrapperStyle={{ gap: spacing.md }}
@@ -116,16 +121,30 @@ export default function LibraryScreen() {
         booksQuery.isLoading ? <LoadingBlock /> : <EmptyState title="No books found" body="Try a different search or filter." />
       }
       renderItem={({ item }) => (
-        <BookTile book={item} issued={issued.has(item.id)} onPress={() => router.push(`/catalogue/${item.id}`)} />
+        <BookTile
+          book={item}
+          copies={counts[item.id] ?? 0}
+          issued={issued.has(item.id)}
+          onPress={() => router.push(`/catalogue/${item.id}`)}
+        />
       )}
     />
   );
 }
 
-function BookTile({ book, issued, onPress }: { book: Book; issued: boolean; onPress: () => void }) {
+function BookTile({
+  book,
+  copies,
+  issued,
+  onPress,
+}: {
+  book: Book;
+  copies: number;
+  issued: boolean;
+  onPress: () => void;
+}) {
   const styles = useStyles();
   const { colors } = useTheme();
-  const copies = availablePhysicalCount(book.id);
   const status = issued
     ? { label: 'Issued to you', fg: colors.accent, bg: colors.accentMuted }
     : copies > 0

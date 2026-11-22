@@ -3,10 +3,12 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { FlatList, View } from 'react-native';
 
-import { getBook, mockApi } from '@/src/api/mockStore';
+import { api } from '@/src/api';
+import { useActionCentre, useCatalogue, usePolicy } from '@/src/api/hooks';
 import { useAuth } from '@/src/auth/AuthContext';
 import { LoanRow } from '@/src/components/LoanRow';
 import { AppText, EmptyState, ErrorBlock, LoadingBlock, SearchBox, Segmented } from '@/src/components/ui';
+import { filterLoans, loanMatchesFilter } from '@/src/domain/loanDisplay';
 import { BookFilter } from '@/src/domain/types';
 import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
 import { spacing } from '@/src/theme/tokens';
@@ -35,22 +37,30 @@ export default function BooksScreen() {
     }
   }, [params.filter]);
 
+  const policy = usePolicy();
+  const catalogue = useCatalogue();
+  const actions = useActionCentre();
   const loansQuery = useQuery({
     queryKey: ['loans', user?.id],
-    queryFn: () => mockApi.listLoans(user!.id),
+    queryFn: () => api.listLoans(user!.id),
     enabled: Boolean(user),
   });
 
   const all = loansQuery.data ?? [];
-  const rows = useMemo(() => mockApi.filterLoans(all, filter, q), [all, filter, q]);
+  const dueSoonDays = policy.approachingMaxDays;
+  const rows = useMemo(
+    () => filterLoans(all, filter, q, catalogue.getBook, dueSoonDays),
+    [all, filter, q, catalogue.getBook, dueSoonDays],
+  );
 
-  if (loansQuery.isLoading) return <LoadingBlock />;
+  if (loansQuery.isLoading || catalogue.isLoading) return <LoadingBlock />;
   if (loansQuery.isError) {
     return <ErrorBlock message={(loansQuery.error as Error).message} onRetry={() => loansQuery.refetch()} />;
   }
   if (!user) return null;
 
-  const count = (f: BookFilter) => all.filter((l) => mockApi.loanMatchesFilter(l, f)).length;
+  const count = (f: BookFilter) => all.filter((l) => loanMatchesFilter(l, f, dueSoonDays)).length;
+  const eligibilityByLoan = actions.data?.eligibilityByLoan ?? {};
   const options = [
     { id: 'ISSUED' as const, label: 'Issued', count: count('ISSUED'), color: colors.accent },
     { id: 'DUE_SOON' as const, label: 'Due', count: count('DUE_SOON'), color: colors.warning },
@@ -73,9 +83,16 @@ export default function BooksScreen() {
         contentContainerStyle={{ gap: spacing.sm, paddingBottom: spacing.xxl }}
         ListEmptyComponent={<EmptyState {...EMPTY[filter]} />}
         renderItem={({ item }) => {
-          const book = getBook(item.bookId);
+          const book = catalogue.getBook(item.bookId);
           if (!book) return null;
-          return <LoanRow loan={item} book={book} student={user} onPress={() => router.push(`/book/${item.id}`)} />;
+          return (
+            <LoanRow
+              loan={item}
+              book={book}
+              eligibility={eligibilityByLoan[item.id]}
+              onPress={() => router.push(`/book/${item.id}`)}
+            />
+          );
         }}
       />
     </View>

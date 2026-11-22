@@ -1,6 +1,12 @@
-import { addDays, formatISO } from 'date-fns';
-import { httpClient } from './httpClient';
+/**
+ * Offline mock implementation of LibraryApi, used only when
+ * EXPO_PUBLIC_API_URL is not set. It is never used as a fallback in API mode.
+ * Rules mirror the backend (returned loans cannot be renewed, ledger fines are
+ * separate from estimates, money is computed in paise).
+ */
+import { addDays, differenceInCalendarDays, formatISO, parseISO, startOfDay } from 'date-fns';
 
+import { now } from '../config';
 import {
   academicNeeds as seedNeeds,
   activities as seedActivities,
@@ -15,28 +21,24 @@ import {
   students as seedStudents,
   topics,
 } from '../data/seed';
-import { daysRemaining } from '../domain/loanDisplay';
+import { daysRemaining, isOpenLoan } from '../domain/loanDisplay';
 import {
+  AcademicContext,
   AcademicNeed,
+  ActionCentre,
   ActivityItem,
   AlternativeMatch,
-  AssessmentType,
   Book,
   BookCopy,
-  BookFilter,
   EligibilityResult,
   FineEntry,
   Loan,
-  NeedDecision,
   NotificationItem,
-  NotificationPreference,
-  NOW,
-  ProfilePatch,
-  RegisterInput,
   RenewalAttempt,
   Reservation,
   Student,
 } from '../domain/types';
+import type { LibraryApi, PublicStudent } from './types';
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -63,89 +65,97 @@ const renewalAttempts: RenewalAttempt[] = [
 ];
 
 let idCounter = 1000;
-function nextId(prefix: string): string {
-  idCounter += 1;
-  return `${prefix}-${idCounter}`;
-}
+const nextId = (prefix: string) => `${prefix}-${++idCounter}`;
 
-function publicStudent(student: Student): Omit<Student, 'password'> {
+const toPaise = (n: number) => Math.round(n * 100);
+const fromPaise = (n: number) => n / 100;
+const sumMoney = (xs: number[]) => fromPaise(xs.reduce((s, x) => s + toPaise(x), 0));
+
+function publicStudent(student: Student): PublicStudent {
   const { password: _password, ...rest } = student;
   return rest;
 }
 
-export function topicName(id: string): string {
-  return topics.find((t) => t.id === id)?.name ?? id;
-}
-
-export function courseName(id: string): string {
+const topicName = (id: string) => topics.find((t) => t.id === id)?.name ?? id;
+const courseName = (id: string) => {
   const course = courses.find((c) => c.id === id);
   return course ? `${course.code} ${course.name}` : id;
+};
+const getBook = (id: string): Book | undefined => books.find((b) => b.id === id);
+const availablePhysicalCount = (bookId: string) =>
+  copies.filter((c) => c.bookId === bookId && c.status === 'AVAILABLE').length;
+const availableCounts = () => Object.fromEntries(books.map((b) => [b.id, availablePhysicalCount(b.id)]));
+
+/** Mock loans are stored ACTIVE/RETURNED; OVERDUE is derived like on the server. */
+function withStatus(loan: Loan): Loan {
+  if (loan.status === 'RETURNED') return clone(loan);
+  return { ...clone(loan), status: daysRemaining(loan.dueAt) < 0 ? 'OVERDUE' : 'ACTIVE' };
 }
 
-export function availablePhysicalCount(bookId: string): number {
-  return copies.filter((c) => c.bookId === bookId && c.status === 'AVAILABLE').length;
+function academicContextFor(loan: Loan, projectedDueAt?: string): AcademicContext | null {
+  const book = getBook(loan.bookId);
+  if (!book || loan.status === 'RETURNED') return null;
+  const at = startOfDay(now());
+  const bookTopics = book.topicIds.map((id) => topicName(id).toLowerCase());
+  const match = needs
+    .filter((n) => n.userId === loan.userId && startOfDay(parseISO(n.neededUntil)) >= at)
+    .filter((n) => bookTopics.some((t) => t.includes(n.topic.toLowerCase()) || n.topic.toLowerCase().includes(t)))
+    .sort((a, b) => b.neededUntil.localeCompare(a.neededUntil))[0];
+  if (!match) return null;
+  const until = startOfDay(parseISO(match.neededUntil));
+  return {
+    needId: match.id,
+    course: match.course,
+    topic: match.topic,
+    assessmentType: match.assessmentType,
+    assessmentDate: match.assessmentDate,
+    neededUntil: match.neededUntil,
+    daysUntilAssessment: differenceInCalendarDays(parseISO(match.assessmentDate), now()),
+    neededBeyondDue: until > startOfDay(parseISO(loan.dueAt)),
+    ...(projectedDueAt ? { renewalCoversNeed: startOfDay(parseISO(projectedDueAt)) >= until } : {}),
+  };
 }
 
-export function getBook(id: string): Book | undefined {
-  return books.find((b) => b.id === id);
-}
-
-export function evaluateEligibility(loan: Loan, student: { id: string; restricted: boolean }): EligibilityResult {
+function evaluateEligibility(loan: Loan, student: { id: string; restricted: boolean }): EligibilityResult {
   const book = getBook(loan.bookId);
   const days = daysRemaining(loan.dueAt);
-  const hasReservation = reservations.some((r) => r.bookId === loan.bookId && r.status === 'ACTIVE' && r.userId !== student.id);
+  const base = { policyName: policy.name, maxRenewals: policy.maxRenewals, renewalsUsed: loan.renewalCount };
+  const blocked = (reasonCode: EligibilityResult['reasonCode'], reason: string, suggestedAction: EligibilityResult['suggestedAction']) => ({
+    ...base,
+    eligible: false,
+    reasonCode,
+    reason,
+    suggestedAction,
+    academicContext: academicContextFor(loan),
+  });
 
+  if (loan.status === 'RETURNED') {
+    return blocked('LOAN_RETURNED', 'This loan has already been returned, so it cannot be renewed.', 'NONE');
+  }
   if (days < 0) {
-    return {
-      eligible: false,
-      reasonCode: 'LOAN_OVERDUE',
-      reason: 'Overdue loans cannot be renewed until the item is returned and any simulated fine is cleared.',
-      suggestedAction: 'RETURN',
-      policyName: policy.name,
-    };
+    return blocked('LOAN_OVERDUE', 'Overdue loans cannot be renewed until the item is returned.', 'RETURN');
   }
   if (student.restricted) {
-    return {
-      eligible: false,
-      reasonCode: 'ACCOUNT_RESTRICTED',
-      reason: 'This demo account is marked restricted, so renewals are blocked.',
-      suggestedAction: 'FIND_ALTERNATIVE',
-      policyName: policy.name,
-    };
+    return blocked('ACCOUNT_RESTRICTED', 'This demo account is marked restricted, so renewals are blocked.', 'FIND_ALTERNATIVE');
   }
   if (!book?.renewable) {
-    return {
-      eligible: false,
-      reasonCode: 'ITEM_NOT_RENEWABLE',
-      reason: 'This title is marked not renewable in the configured demo policy.',
-      suggestedAction: 'FIND_ALTERNATIVE',
-      policyName: policy.name,
-    };
+    return blocked('ITEM_NOT_RENEWABLE', 'This title is marked not renewable in the configured demo policy.', 'FIND_ALTERNATIVE');
   }
-  if (hasReservation) {
-    return {
-      eligible: false,
-      reasonCode: 'ACTIVE_RESERVATION',
-      reason: 'Another student has reserved this book.',
-      suggestedAction: 'FIND_ALTERNATIVE',
-      policyName: policy.name,
-    };
+  if (reservations.some((r) => r.bookId === loan.bookId && r.status === 'ACTIVE' && r.userId !== student.id)) {
+    return blocked('ACTIVE_RESERVATION', 'Another student has reserved this book.', 'FIND_ALTERNATIVE');
   }
   if (loan.renewalCount >= policy.maxRenewals) {
-    return {
-      eligible: false,
-      reasonCode: 'MAX_RENEWALS_REACHED',
-      reason: `Maximum renewals (${policy.maxRenewals}) already used on this loan.`,
-      suggestedAction: 'FIND_ALTERNATIVE',
-      policyName: policy.name,
-    };
+    return blocked('MAX_RENEWALS_REACHED', `Maximum renewals (${policy.maxRenewals}) already used on this loan.`, 'FIND_ALTERNATIVE');
   }
+  const projectedDueAt = formatISO(addDays(parseISO(loan.dueAt), policy.renewalPeriodDays));
   return {
+    ...base,
     eligible: true,
     reasonCode: 'ELIGIBLE',
     reason: `Eligible under ${policy.name}. A renewal would add ${policy.renewalPeriodDays} days.`,
     suggestedAction: 'RENEW',
-    policyName: policy.name,
+    projectedDueAt,
+    academicContext: academicContextFor(loan, projectedDueAt),
   };
 }
 
@@ -157,12 +167,11 @@ function jaccard(a: string[], b: string[]): number {
   return union === 0 ? 0 : intersection / union;
 }
 
-export function rankAlternatives(sourceBookId: string, userId: string): AlternativeMatch[] {
+function rankAlternatives(sourceBookId: string, userId: string): AlternativeMatch[] {
   const source = getBook(sourceBookId);
   if (!source) return [];
-  const userNeedTopics = needs
-    .filter((n) => n.userId === userId)
-    .map((n) => n.topic.toLowerCase());
+  const at = startOfDay(now());
+  const activeNeeds = needs.filter((n) => n.userId === userId && startOfDay(parseISO(n.neededUntil)) >= at);
 
   return books
     .filter((book) => book.id !== sourceBookId)
@@ -170,44 +179,29 @@ export function rankAlternatives(sourceBookId: string, userId: string): Alternat
       const topicScore = jaccard(source.topicIds, book.topicIds);
       const courseScore = jaccard(source.courseIds, book.courseIds);
       const levelScore = book.academicLevel === source.academicLevel ? 1 : 0.4;
-      const needBoost = book.topicIds.some((id) => userNeedTopics.includes(topicName(id).toLowerCase()))
-        ? 0.15
-        : 0;
-      const metadata = Math.min(1, topicScore * 0.75 + needBoost);
-      const score =
-        policy.recommendationWeights.metadata * metadata +
-        policy.recommendationWeights.tfidf * topicScore +
-        policy.recommendationWeights.course * courseScore +
-        policy.recommendationWeights.level * levelScore;
+      const need = activeNeeds.find((n) => book.topicIds.some((id) => topicName(id).toLowerCase() === n.topic.toLowerCase()));
+      const needDays = need ? differenceInCalendarDays(parseISO(need.assessmentDate), now()) : Infinity;
+      const needWeight = !need ? 0 : needDays <= 7 ? 1 : needDays <= 21 ? 0.7 : 0.4;
+      const metadata = Math.min(1, topicScore * 0.8 + 0.2 * needWeight);
+      const w = policy.recommendationWeights;
+      const score = w.metadata * metadata + w.tfidf * topicScore + w.course * courseScore + w.level * levelScore;
 
       const matchingTopics = book.topicIds.filter((id) => source.topicIds.includes(id)).map(topicName);
       const reasons: string[] = matchingTopics.map((name) => `Covers ${name}.`);
-      source.courseIds
-        .filter((id) => book.courseIds.includes(id))
-        .forEach((id) => reasons.push(`Relevant to ${courseName(id)}.`));
-      if (book.academicLevel === source.academicLevel) {
-        reasons.push(`Same academic level (${book.academicLevel}).`);
-      }
+      source.courseIds.filter((id) => book.courseIds.includes(id)).forEach((id) => reasons.push(`Relevant to ${courseName(id)}.`));
+      if (book.academicLevel === source.academicLevel) reasons.push(`Same academic level (${book.academicLevel}).`);
+      if (need) reasons.push(`Covers ${need.topic} for your ${need.assessmentType.toLowerCase()} (in ${needDays} days).`);
+
       const availablePhysical = availablePhysicalCount(book.id);
       const digitalAccessible = Boolean(book.digitalUrl);
       if (availablePhysical > 0) {
-        reasons.push(
-          `${availablePhysical} physical cop${availablePhysical === 1 ? 'y is' : 'ies are'} available (simulated).`,
-        );
+        reasons.push(`${availablePhysical} physical cop${availablePhysical === 1 ? 'y is' : 'ies are'} available (simulated).`);
       } else if (digitalAccessible) {
         reasons.push('No physical copy is free; a demo digital record exists.');
       } else {
         reasons.push('No currently accessible copy. Shown only if you still want related titles.');
       }
-
-      return {
-        bookId: book.id,
-        score,
-        matchingTopics,
-        reasons,
-        availablePhysical,
-        digitalAccessible,
-      };
+      return { bookId: book.id, book, score, matchingTopics, reasons, availablePhysical, digitalAccessible };
     })
     .filter((row) => row.score >= 0.12)
     .sort((a, b) => {
@@ -220,436 +214,88 @@ export function rankAlternatives(sourceBookId: string, userId: string): Alternat
 }
 
 function delay<T>(value: T): Promise<T> {
-  return new Promise((resolve) => setTimeout(() => resolve(clone(value)), 180));
+  return new Promise((resolve) => setTimeout(() => resolve(clone(value)), 120));
 }
 
-export const mockApi = {
-  async login(identifier: string, password: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.login(identifier, password);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
+function findStudent(userId: string): Student {
+  const student = students.find((s) => s.id === userId);
+  if (!student) throw new Error('Session expired.');
+  return student;
+}
+
+function findLoan(userId: string, loanId: string): Loan {
+  const loan = loans.find((l) => l.id === loanId && l.userId === userId);
+  if (!loan) throw new Error('Loan not found.');
+  return loan;
+}
+
+function addActivity(userId: string, kind: ActivityItem['kind'], title: string, detail: string) {
+  activities.unshift({ id: nextId('a'), userId, at: formatISO(now()), kind, title, detail });
+}
+
+export const mockApi: LibraryApi = {
+  mode: 'mock',
+
+  async login(identifier, password) {
     const key = identifier.trim().toLowerCase();
-    const student = students.find(
-      (s) => s.studentId.toLowerCase() === key || s.email.toLowerCase() === key,
-    );
-    // Demo mode: any password works for a known Student ID / email.
-    if (!student) {
-      return Promise.reject(new Error('No student found with that Student ID or email.'));
+    const student = students.find((s) => s.studentId.toLowerCase() === key || s.email.toLowerCase() === key);
+    if (!student || student.password !== password) {
+      throw new Error('Invalid Student ID / email or password.');
     }
+    return delay({ user: publicStudent(student) });
+  },
+
+  async register(input) {
+    if (input.password.length < 8) throw new Error('Password must be at least 8 characters.');
+    const email = input.email.trim().toLowerCase();
+    if (students.some((s) => s.studentId === input.studentId || s.email === email)) {
+      throw new Error('Student ID or email is already registered in this demo.');
+    }
+    const student: Student = {
+      ...input,
+      email,
+      id: nextId('u'),
+      restricted: false,
+      notificationPreference: 'NORMAL',
+    };
+    students.push(student);
+    return delay({ user: publicStudent(student) });
+  },
+
+  async me(userId) {
+    return delay(publicStudent(findStudent(userId)));
+  },
+
+  async updatePreferences(userId, pref) {
+    const student = findStudent(userId);
+    student.notificationPreference = pref;
     return delay(publicStudent(student));
   },
 
-  async updateProfile(userId: string, patch: ProfilePatch) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.updateProfile(patch);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const student = students.find((s) => s.id === userId);
-    if (!student) return Promise.reject(new Error('Session expired.'));
-    const clean: ProfilePatch = {};
-    (Object.keys(patch) as (keyof ProfilePatch)[]).forEach((k) => {
+  async updateProfile(userId, patch) {
+    const student = findStudent(userId);
+    const clean: typeof patch = {};
+    (Object.keys(patch) as (keyof typeof patch)[]).forEach((k) => {
       const v = patch[k]?.trim();
       if (v) clean[k] = v;
     });
-    if (clean.name !== undefined && clean.name.length < 2) {
-      return Promise.reject(new Error('Name must be at least 2 characters.'));
-    }
+    if (clean.name !== undefined && clean.name.length < 2) throw new Error('Name must be at least 2 characters.');
     if (clean.email !== undefined) {
-      if (!/^\S+@\S+\.\S+$/.test(clean.email)) {
-        return Promise.reject(new Error('Enter a valid email address.'));
+      if (!/^\S+@\S+\.\S+$/.test(clean.email)) throw new Error('Enter a valid email address.');
+      clean.email = clean.email.toLowerCase();
+      if (students.some((s) => s.id !== userId && s.email.toLowerCase() === clean.email)) {
+        throw new Error('That email is already used by another student.');
       }
-      const taken = students.some(
-        (s) => s.id !== userId && s.email.toLowerCase() === clean.email!.toLowerCase(),
-      );
-      if (taken) return Promise.reject(new Error('That email is already used by another student.'));
     }
     Object.assign(student, clean);
     return delay(publicStudent(student));
   },
 
-  /** Simulated return: closes the loan, frees the copy and records any overdue fine. */
-  async returnLoan(userId: string, loanId: string) {
-    const loan = loans.find((l) => l.id === loanId && l.userId === userId);
-    if (!loan) return Promise.reject(new Error('Loan not found.'));
-    if (loan.status === 'RETURNED') return delay(loan);
-    const overdueDays = Math.max(0, -daysRemaining(loan.dueAt));
-    loan.status = 'RETURNED';
-    loan.returnedAt = formatISO(NOW);
-    loan.markedForReturn = false;
-    const copy = copies.find((c) => c.id === loan.copyId);
-    if (copy) copy.status = 'AVAILABLE';
-    const book = getBook(loan.bookId);
-    if (overdueDays > 0 && !fines.some((f) => f.loanId === loan.id)) {
-      fines.push({
-        id: nextId('f'),
-        userId,
-        loanId: loan.id,
-        amount: overdueDays * policy.finePerDay,
-        reason: `Overdue loan: ${book?.title ?? 'book'} (${overdueDays} days × ₹${policy.finePerDay}/day)`,
-        at: formatISO(NOW),
-        simulated: true,
-      });
-    }
-    activities.unshift({
-      id: nextId('a'),
-      userId,
-      at: formatISO(NOW),
-      kind: 'RETURNED',
-      title: 'Book returned',
-      detail: `${book?.title ?? 'Book'} was returned (simulated).`,
-    });
-    return delay(loan);
-  },
+  getPolicy: () => delay(policy),
 
-  /** Simulated issue: takes a free physical copy and creates a loan for the standard period. */
-  async borrowBook(userId: string, bookId: string) {
-    const student = students.find((s) => s.id === userId);
-    if (!student) return Promise.reject(new Error('Session expired.'));
-    if (student.restricted) {
-      return Promise.reject(new Error('This demo account is restricted and cannot borrow books.'));
-    }
-    if (loans.some((l) => l.userId === userId && l.bookId === bookId && l.status === 'ACTIVE')) {
-      return Promise.reject(new Error('You already have this book issued.'));
-    }
-    const copy = copies.find((c) => c.bookId === bookId && c.status === 'AVAILABLE');
-    if (!copy) return Promise.reject(new Error('No physical copy is free right now. Try reserving it.'));
-    copy.status = 'ON_LOAN';
-    const loan: Loan = {
-      id: nextId('l'),
-      userId,
-      copyId: copy.id,
-      bookId,
-      issuedAt: formatISO(NOW),
-      dueAt: formatISO(addDays(NOW, policy.loanPeriodDays)),
-      status: 'ACTIVE',
-      renewalCount: 0,
-      markedForReturn: false,
-    };
-    loans.push(loan);
-    activities.unshift({
-      id: nextId('a'),
-      userId,
-      at: loan.issuedAt,
-      kind: 'RESERVATION_UPDATE',
-      title: 'Book issued',
-      detail: `${getBook(bookId)?.title ?? 'Book'} issued until ${loan.dueAt.slice(0, 10)} (simulated).`,
-    });
-    return delay(loan);
-  },
+  getCatalogue: () => delay({ books, availableCounts: availableCounts(), topics, courses }),
 
-  async register(input: RegisterInput) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.register(input);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    if (students.some((s) => s.studentId === input.studentId || s.email === input.email)) {
-      return Promise.reject(new Error('Student ID or email is already registered in this demo.'));
-    }
-    const student: Student = {
-      id: nextId('u'),
-      studentId: input.studentId,
-      name: input.name,
-      email: input.email,
-      password: input.password,
-      course: input.course,
-      academicYear: input.academicYear,
-      restricted: false,
-      notificationPreference: 'NORMAL',
-    };
-    students.push(student);
-    return delay(publicStudent(student));
-  },
-
-  async me(userId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.me();
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const student = students.find((s) => s.id === userId);
-    if (!student) return Promise.reject(new Error('Session expired.'));
-    return delay(publicStudent(student));
-  },
-
-  async updatePreferences(userId: string, notificationPreference: NotificationPreference) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.updatePreferences(notificationPreference);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const student = students.find((s) => s.id === userId);
-    if (!student) return Promise.reject(new Error('Not found'));
-    student.notificationPreference = notificationPreference;
-    return delay(publicStudent(student));
-  },
-
-  async listLoans(userId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.listLoans();
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    return delay(loans.filter((l) => l.userId === userId));
-  },
-
-  async getLoan(userId: string, loanId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.getLoan(loanId);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const loan = loans.find((l) => l.id === loanId && l.userId === userId);
-    if (!loan) return Promise.reject(new Error('Loan not found.'));
-    return delay(loan);
-  },
-
-  async eligibility(userId: string, loanId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.checkEligibility(loanId);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const student = students.find((s) => s.id === userId);
-    const loan = loans.find((l) => l.id === loanId && l.userId === userId);
-    if (!student || !loan) return Promise.reject(new Error('Loan not found.'));
-    return delay(evaluateEligibility(loan, student));
-  },
-
-  async renewalHistory(userId: string, loanId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.renewalHistory(loanId);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const loan = loans.find((l) => l.id === loanId && l.userId === userId);
-    if (!loan) return Promise.reject(new Error('Loan not found.'));
-    return delay(renewalAttempts.filter((a) => a.loanId === loanId));
-  },
-
-  async renew(userId: string, loanId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.renew(loanId);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const student = students.find((s) => s.id === userId);
-    const loan = loans.find((l) => l.id === loanId && l.userId === userId);
-    if (!student || !loan) throw new Error('Loan not found.');
-    const result = evaluateEligibility(loan, student);
-    const attempt: RenewalAttempt = {
-      id: nextId('ra'),
-      loanId,
-      at: formatISO(NOW),
-      eligible: result.eligible,
-      reasonCode: result.eligible ? 'RENEWAL_SUCCESS' : result.reasonCode,
-      reason: result.reason,
-    };
-    if (!result.eligible) {
-      renewalAttempts.unshift(attempt);
-      activities.unshift({
-        id: nextId('a'),
-        userId,
-        at: attempt.at,
-        kind: 'RENEWAL_FAILED',
-        title: 'Failed renewal',
-        detail: result.reason,
-      });
-      await delay(null);
-      return { ok: false as const, result, attempt, loan };
-    }
-    loan.renewalCount += 1;
-    loan.dueAt = formatISO(addDays(NOW, policy.renewalPeriodDays));
-    attempt.newDueAt = loan.dueAt;
-    renewalAttempts.unshift(attempt);
-    activities.unshift({
-      id: nextId('a'),
-      userId,
-      at: attempt.at,
-      kind: 'RENEWAL_SUCCESS',
-      title: 'Successful renewal',
-      detail: `Simulated renewal. New due date ${loan.dueAt.slice(0, 10)}.`,
-    });
-    await delay(null);
-    return { ok: true as const, result, attempt, loan: clone(loan) };
-  },
-
-  async decide(userId: string, loanId: string, decision: NeedDecision) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.decide(loanId, decision);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const loan = loans.find((l) => l.id === loanId && l.userId === userId);
-    if (!loan) throw new Error('Loan not found.');
-    loan.needDecision = decision;
-    loan.markedForReturn = decision === 'DONE';
-    loan.followUpAt = decision === 'NOT_SURE' ? formatISO(addDays(NOW, 2)) : undefined;
-    activities.unshift({
-      id: nextId('a'),
-      userId,
-      at: formatISO(NOW),
-      kind: 'DECISION',
-      title: 'Need decision saved',
-      detail:
-        decision === 'STILL_NEED'
-          ? 'You still need this book. Check renewal next.'
-          : decision === 'DONE'
-            ? 'Marked for return. Renewal reminders are suppressed in this demo session.'
-            : 'Deferred. One follow-up is scheduled for 23 Nov 2026.',
-    });
-    return delay(clone(loan));
-  },
-
-  async alternatives(userId: string, bookId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.alternatives(bookId);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    return delay(rankAlternatives(bookId, userId));
-  },
-
-  async reserve(userId: string, bookId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.reserve(bookId);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const existing = reservations.find((r) => r.bookId === bookId && r.userId === userId && r.status === 'ACTIVE');
-    if (existing) return delay(existing);
-    const row: Reservation = { id: nextId('r'), bookId, userId, status: 'ACTIVE' };
-    reservations.push(row);
-    activities.unshift({
-      id: nextId('a'),
-      userId,
-      at: formatISO(NOW),
-      kind: 'RESERVATION_UPDATE',
-      title: 'Reservation placed',
-      detail: 'Simulated hold placed on this title.',
-    });
-    return delay(row);
-  },
-
-  async listNeeds(userId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.listNeeds();
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    return delay(needs.filter((n) => n.userId === userId));
-  },
-
-  async addNeed(userId: string, input: Omit<AcademicNeed, 'id' | 'userId'>) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.addNeed(input);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const row: AcademicNeed = { ...input, id: nextId('n'), userId };
-    needs.push(row);
-    return delay(row);
-  },
-
-  async updateNeed(userId: string, id: string, patch: Partial<AcademicNeed>) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.updateNeed(id, patch);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const row = needs.find((n) => n.id === id && n.userId === userId);
-    if (!row) return Promise.reject(new Error('Need not found.'));
-    Object.assign(row, patch);
-    return delay(clone(row));
-  },
-
-  async deleteNeed(userId: string, id: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.deleteNeed(id);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const index = needs.findIndex((n) => n.id === id && n.userId === userId);
-    if (index >= 0) needs.splice(index, 1);
-    return delay({ ok: true });
-  },
-
-  async listFines(userId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.listFines();
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    return delay(fines.filter((f) => f.userId === userId));
-  },
-
-  async listNotifications(userId: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        return await httpClient.listNotifications();
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    return delay(notifications.filter((n) => n.userId === userId));
-  },
-
-  async markNotificationRead(userId: string, id: string) {
-    if (httpClient.isConfigured()) {
-      try {
-        await httpClient.markNotificationRead(id);
-        const row = notifications.find((n) => n.id === id && n.userId === userId);
-        if (row) row.read = true;
-        return delay(row);
-      } catch (err: any) {
-        if (err.status) throw err;
-      }
-    }
-    const row = notifications.find((n) => n.id === id && n.userId === userId);
-    if (row) row.read = true;
-    return delay(row);
-  },
-
-  listBooks(query?: { q?: string; available?: boolean; type?: string; category?: string; courseId?: string }) {
+  async listBooks(query) {
     const q = query?.q?.trim().toLowerCase() ?? '';
     let list = books.filter((book) => {
       if (!q) return true;
@@ -666,18 +312,14 @@ export const mockApi = {
     if (query?.courseId) list = list.filter((b) => b.courseIds.includes(query.courseId!));
     if (query?.type === 'PHYSICAL') list = list.filter((b) => b.resourceType !== 'DIGITAL');
     if (query?.type === 'DIGITAL') list = list.filter((b) => b.resourceType !== 'PHYSICAL');
-    if (query?.available === true) {
-      list = list.filter((b) => availablePhysicalCount(b.id) > 0 || Boolean(b.digitalUrl));
-    }
-    if (query?.available === false) {
-      list = list.filter((b) => availablePhysicalCount(b.id) === 0 && !b.digitalUrl);
-    }
-    return delay(list);
+    if (query?.available === true) list = list.filter((b) => availablePhysicalCount(b.id) > 0 || Boolean(b.digitalUrl));
+    if (query?.available === false) list = list.filter((b) => availablePhysicalCount(b.id) === 0 && !b.digitalUrl);
+    return delay({ books: list, availableCounts: availableCounts() });
   },
 
-  getBookDetail(id: string) {
+  async getBookDetail(id) {
     const book = getBook(id);
-    if (!book) return Promise.reject(new Error('Book not found.'));
+    if (!book) throw new Error('Book not found.');
     return delay({
       book,
       copies: copies.filter((c) => c.bookId === id),
@@ -687,54 +329,248 @@ export const mockApi = {
     });
   },
 
-  listActivity(userId: string) {
+  async listLoans(userId) {
+    return delay(loans.filter((l) => l.userId === userId).map(withStatus));
+  },
+
+  async getLoan(userId, loanId) {
+    return delay(withStatus(findLoan(userId, loanId)));
+  },
+
+  async eligibility(userId, loanId) {
+    return delay(evaluateEligibility(withStatus(findLoan(userId, loanId)), findStudent(userId)));
+  },
+
+  async actionCentre(userId): Promise<ActionCentre> {
+    const student = findStudent(userId);
+    const open = loans.filter((l) => l.userId === userId).map(withStatus).filter(isOpenLoan);
+    const eligibilityByLoan: ActionCentre['eligibilityByLoan'] = {};
+    const needsAttention: ActionCentre['needsAttention'] = [];
+    for (const loan of open) {
+      const eligibility = evaluateEligibility(loan, student);
+      eligibilityByLoan[loan.id] = eligibility;
+      const days = daysRemaining(loan.dueAt);
+      const ctx = eligibility.academicContext ?? null;
+      const pressure = !!ctx?.neededBeyondDue && ctx.daysUntilAssessment <= policy.approachingMaxDays * 2;
+      if (!(days <= policy.approachingMaxDays || loan.markedForReturn || pressure)) continue;
+      const actionLabel = loan.markedForReturn
+        ? 'Prepare return'
+        : days < 0
+          ? 'Return book'
+          : eligibility.eligible
+            ? ctx?.neededBeyondDue
+              ? 'Renew now'
+              : 'Check renewal'
+            : eligibility.suggestedAction === 'FIND_ALTERNATIVE'
+              ? 'Find alternatives'
+              : 'Review';
+      needsAttention.push({
+        loanId: loan.id,
+        bookId: loan.bookId,
+        daysRemaining: days,
+        actionLabel,
+        why: eligibility.eligible ? `Due in ${days} day(s).` : eligibility.reason,
+        eligibility,
+        academicContext: ctx,
+      });
+    }
+    needsAttention.sort((a, b) => a.daysRemaining - b.daysRemaining);
+    return delay({ needsAttention, eligibilityByLoan });
+  },
+
+  async renewalHistory(userId, loanId) {
+    findLoan(userId, loanId);
+    return delay(renewalAttempts.filter((a) => a.loanId === loanId));
+  },
+
+  async renew(userId, loanId) {
+    const student = findStudent(userId);
+    const loan = findLoan(userId, loanId);
+    const result = evaluateEligibility(withStatus(loan), student);
+    const attempt: RenewalAttempt = {
+      id: nextId('ra'),
+      loanId,
+      at: formatISO(now()),
+      eligible: result.eligible,
+      reasonCode: result.eligible ? 'RENEWAL_SUCCESS' : result.reasonCode,
+      reason: result.reason,
+    };
+    if (!result.eligible) {
+      renewalAttempts.unshift(attempt);
+      addActivity(userId, 'RENEWAL_FAILED', 'Failed renewal', result.reason);
+      return delay({ ok: false, result, loan: withStatus(loan) });
+    }
+    loan.renewalCount += 1;
+    loan.dueAt = formatISO(addDays(parseISO(loan.dueAt), policy.renewalPeriodDays));
+    attempt.newDueAt = loan.dueAt;
+    renewalAttempts.unshift(attempt);
+    addActivity(userId, 'RENEWAL_SUCCESS', 'Successful renewal', `New due date ${loan.dueAt.slice(0, 10)}.`);
+    return delay({ ok: true, result, loan: withStatus(loan) });
+  },
+
+  async decide(userId, loanId, decision) {
+    const loan = findLoan(userId, loanId);
+    if (loan.status === 'RETURNED') throw new Error('This loan has already been returned.');
+    loan.needDecision = decision;
+    loan.markedForReturn = decision === 'DONE';
+    let followUp = addDays(now(), 2);
+    if (followUp > parseISO(loan.dueAt)) followUp = parseISO(loan.dueAt);
+    loan.followUpAt = decision === 'NOT_SURE' ? formatISO(followUp) : undefined;
+    addActivity(
+      userId,
+      'DECISION',
+      'Need decision saved',
+      decision === 'STILL_NEED'
+        ? 'You still need this book. Check renewal next.'
+        : decision === 'DONE'
+          ? 'Marked for return. Due-soon reminders are switched off for it.'
+          : `Deferred. One follow-up is scheduled for ${formatISO(followUp, { representation: 'date' })}.`,
+    );
+    return delay(withStatus(loan));
+  },
+
+  async returnLoan(userId, loanId) {
+    const loan = findLoan(userId, loanId);
+    if (loan.status === 'RETURNED') throw new Error('This loan has already been returned.');
+    const overdueDays = Math.max(0, -daysRemaining(loan.dueAt));
+    loan.status = 'RETURNED';
+    loan.returnedAt = formatISO(now());
+    loan.markedForReturn = false;
+    loan.followUpAt = undefined;
+    const copy = copies.find((c) => c.id === loan.copyId);
+    if (copy) copy.status = reservations.some((r) => r.bookId === loan.bookId && r.status === 'ACTIVE' && r.userId !== userId) ? 'RESERVED' : 'AVAILABLE';
+    const book = getBook(loan.bookId);
+    let fine: FineEntry | null = null;
+    if (overdueDays > 0 && !fines.some((f) => f.loanId === loan.id)) {
+      fine = {
+        id: nextId('f'),
+        userId,
+        loanId: loan.id,
+        amount: fromPaise(toPaise(policy.finePerDay) * overdueDays),
+        reason: `Returned late: ${book?.title ?? 'book'} (${overdueDays} days × ₹${policy.finePerDay.toFixed(2)}/day)`,
+        at: formatISO(now()),
+      };
+      fines.push(fine);
+    }
+    addActivity(userId, 'RETURNED', 'Book returned', `${book?.title ?? 'Book'} was returned.`);
+    return delay({ loan: withStatus(loan), fine });
+  },
+
+  async borrowBook(userId, bookId) {
+    const student = findStudent(userId);
+    if (student.restricted) throw new Error('This demo account is restricted and cannot borrow books.');
+    if (loans.some((l) => l.userId === userId && l.bookId === bookId && l.status !== 'RETURNED')) {
+      throw new Error('You already have this book issued.');
+    }
+    const copy = copies.find((c) => c.bookId === bookId && c.status === 'AVAILABLE');
+    if (!copy) throw new Error('No physical copy is free right now. Try reserving it.');
+    copy.status = 'ON_LOAN';
+    const loan: Loan = {
+      id: nextId('l'),
+      userId,
+      copyId: copy.id,
+      bookId,
+      issuedAt: formatISO(now()),
+      dueAt: formatISO(addDays(now(), policy.loanPeriodDays)),
+      status: 'ACTIVE',
+      renewalCount: 0,
+      markedForReturn: false,
+    };
+    loans.push(loan);
+    addActivity(userId, 'RESERVATION_UPDATE', 'Book issued', `${getBook(bookId)?.title ?? 'Book'} issued until ${loan.dueAt.slice(0, 10)}.`);
+    return delay(withStatus(loan));
+  },
+
+  async reserve(userId, bookId) {
+    if (loans.some((l) => l.userId === userId && l.bookId === bookId && l.status !== 'RETURNED')) {
+      throw new Error('You already have this book issued.');
+    }
+    const existing = reservations.find((r) => r.bookId === bookId && r.userId === userId && r.status === 'ACTIVE');
+    if (existing) return delay(existing);
+    const row: Reservation = { id: nextId('r'), bookId, userId, status: 'ACTIVE' };
+    reservations.push(row);
+    addActivity(userId, 'RESERVATION_UPDATE', 'Reservation placed', 'Simulated hold placed on this title.');
+    return delay(row);
+  },
+
+  async alternatives(userId, bookId) {
+    return delay(rankAlternatives(bookId, userId));
+  },
+
+  async listNeeds(userId) {
+    return delay(needs.filter((n) => n.userId === userId));
+  },
+
+  async addNeed(userId, input) {
+    if (input.neededUntil < input.assessmentDate) throw new Error('"Needed until" cannot be before the assessment date.');
+    if (startOfDay(parseISO(input.neededUntil)) < startOfDay(now())) throw new Error('"Needed until" is already in the past.');
+    const row: AcademicNeed = { ...input, id: nextId('n'), userId };
+    needs.push(row);
+    return delay(row);
+  },
+
+  async deleteNeed(userId, id) {
+    const index = needs.findIndex((n) => n.id === id && n.userId === userId);
+    if (index >= 0) needs.splice(index, 1);
+    return delay({ ok: true });
+  },
+
+  async getFines(userId) {
+    const entries = fines.filter((f) => f.userId === userId);
+    const estimates = loans
+      .filter((l) => l.userId === userId && l.status !== 'RETURNED' && daysRemaining(l.dueAt) < 0)
+      .map((l) => {
+        const daysOverdue = -daysRemaining(l.dueAt);
+        return {
+          loanId: l.id,
+          bookId: l.bookId,
+          bookTitle: getBook(l.bookId)?.title ?? 'Unknown title',
+          daysOverdue,
+          estimatedFine: fromPaise(toPaise(policy.finePerDay) * daysOverdue),
+        };
+      });
+    return delay({
+      dailyRate: policy.finePerDay,
+      ledger: { total: sumMoney(entries.map((e) => e.amount)), entries },
+      estimates: { total: sumMoney(estimates.map((e) => e.estimatedFine)), loans: estimates },
+    });
+  },
+
+  async estimateFine(userId, loanId) {
+    const loan = findLoan(userId, loanId);
+    const recordedAmount = sumMoney(fines.filter((f) => f.loanId === loanId).map((f) => f.amount));
+    if (loan.status === 'RETURNED') {
+      return delay({
+        daysLate: 0,
+        estimatedAmount: 0,
+        dailyRate: policy.finePerDay,
+        returned: true,
+        recordedAmount,
+        calculation: recordedAmount > 0 ? `Returned. ₹${recordedAmount.toFixed(2)} is in the fine ledger.` : 'Returned on time.',
+      });
+    }
+    const daysLate = Math.max(0, -daysRemaining(loan.dueAt));
+    const estimatedAmount = fromPaise(toPaise(policy.finePerDay) * daysLate);
+    return delay({
+      daysLate,
+      estimatedAmount,
+      dailyRate: policy.finePerDay,
+      returned: false,
+      recordedAmount,
+      calculation: `${daysLate} overdue days × ₹${policy.finePerDay.toFixed(2)}/day = ₹${estimatedAmount.toFixed(2)} (estimate)`,
+    });
+  },
+
+  async listNotifications(userId) {
+    return delay(notifications.filter((n) => n.userId === userId));
+  },
+
+  async markNotificationRead(userId, id) {
+    const row = notifications.find((n) => n.id === id && n.userId === userId);
+    if (row) row.read = true;
+  },
+
+  async listActivity(userId) {
     return delay(activities.filter((a) => a.userId === userId).slice(0, 12));
   },
-
-  estimateFine(loan: Loan): number {
-    const days = daysRemaining(loan.dueAt);
-    if (days >= 0) return 0;
-    return Math.abs(days) * policy.finePerDay;
-  },
-
-  loanMatchesFilter(loan: Loan, filter: BookFilter): boolean {
-    const days = daysRemaining(loan.dueAt);
-    switch (filter) {
-      case 'ISSUED':
-        return loan.status === 'ACTIVE';
-      case 'DUE_SOON':
-        return loan.status === 'ACTIVE' && days >= 0 && days <= policy.approachingMaxDays;
-      case 'OVERDUE':
-        return loan.status === 'ACTIVE' && days < 0;
-      case 'RETURNED':
-        return loan.status === 'RETURNED';
-      default:
-        return true;
-    }
-  },
-
-  filterLoans(userLoans: Loan[], filter: BookFilter, q: string): Loan[] {
-    const query = q.trim().toLowerCase();
-    return userLoans
-      .filter((loan) => mockApi.loanMatchesFilter(loan, filter))
-      .filter((loan) => {
-        if (!query) return true;
-        const book = getBook(loan.bookId);
-        const hay = `${book?.title} ${book?.author} ${book?.category}`.toLowerCase();
-        return hay.includes(query);
-      })
-      .sort((a, b) =>
-        filter === 'RETURNED'
-          ? (b.returnedAt ?? '').localeCompare(a.returnedAt ?? '')
-          : a.dueAt.localeCompare(b.dueAt),
-      );
-  },
-
-  policy,
-  books,
-  topics,
-  courses,
 };
-
-export type PublicStudent = Omit<Student, 'password'>;
-export type Assessment = AssessmentType;

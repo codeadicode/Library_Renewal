@@ -52,6 +52,28 @@ export function createApiRouter(services: Services): Router {
   router.patch('/auth/preferences', auth, authCtrl.updatePreferences);
   router.patch('/auth/profile', auth, authCtrl.updateProfile);
 
+  // Borrowing policy (limits and fine rate the app displays)
+  router.get('/policy', auth, async (_req, res, next) => {
+    try {
+      const p = await services.store.repos.policy.getDefaultPolicy();
+      res.json({
+        id: p.id,
+        name: p.name,
+        maxRenewals: p.maxRenewals,
+        loanPeriodDays: p.loanPeriodDays,
+        renewalPeriodDays: p.renewalPeriodDays,
+        upcomingDays: p.upcomingDays,
+        approachingMinDays: p.approachingMinDays,
+        approachingMaxDays: p.approachingMaxDays,
+        urgentMaxDays: p.urgentMaxDays,
+        finePerDay: p.finePerDay,
+        recommendationWeights: { metadata: p.weightMetadata, tfidf: p.weightTfidf, course: p.weightCourse, level: p.weightLevel },
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Catalogue
   router.get('/books/topics', auth, bookCtrl.getTopics);
   router.get('/books/courses', auth, bookCtrl.getCourses);

@@ -26,9 +26,13 @@ export default function RegisterScreen() {
   }
 
   async function onSubmit() {
-    const { password: _password, ...required } = form;
+    const { password, ...required } = form;
     if (Object.values(required).some((v) => !v.trim())) {
-      setError('Fill in every field (password is optional).');
+      setError('Fill in every field.');
+      return;
+    }
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters.');
       return;
     }
     setBusy(true);
@@ -55,7 +59,7 @@ export default function RegisterScreen() {
         autoCapitalize="none"
       />
       <Field
-        label="Password (optional)"
+        label="Password (at least 8 characters)"
         value={form.password}
         onChangeText={(v) => set('password', v)}
         secure

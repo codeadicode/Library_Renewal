@@ -699,7 +699,7 @@ export const loans: Loan[] = [
     bookId: 'b-haykin',
     issuedAt: '2026-09-18T10:00:00+05:30',
     dueAt: '2026-10-02T21:00:00+05:30',
-    returnedAt: '2026-10-01T16:30:00+05:30',
+    returnedAt: '2026-10-05T16:30:00+05:30', // 3 days late -> ledger fine below
     status: 'RETURNED',
     renewalCount: 0,
     markedForReturn: false,
@@ -728,14 +728,15 @@ export const academicNeeds: AcademicNeed[] = [
 ];
 
 export const fines: FineEntry[] = [
+  // Recorded when l-priya-hay was returned late. Her open overdue loan
+  // (l-priya-sadiku) is only an *estimate* until it is returned.
   {
     id: 'f-priya-1',
     userId: 'u-priya',
-    loanId: 'l-priya-sadiku',
-    amount: 20,
-    reason: 'Overdue loan: Principles of Electromagnetics (4 days × ₹5/day)',
-    at: '2026-11-21T09:00:00+05:30',
-    simulated: true,
+    loanId: 'l-priya-hay',
+    amount: 15,
+    reason: 'Returned late: Communication Systems (3 days × ₹5.00/day)',
+    at: '2026-10-05T16:30:00+05:30',
   },
 ];
 
@@ -770,6 +771,7 @@ export const notifications: NotificationItem[] = [
   {
     id: 'nt-akash-1',
     userId: 'u-akash',
+    kind: 'DUE_SOON',
     title: 'Due tomorrow',
     body: 'Operating System Concepts is due 22 Nov. Another student has reserved it.',
     at: '2026-11-21T08:00:00+05:30',
@@ -778,6 +780,7 @@ export const notifications: NotificationItem[] = [
   {
     id: 'nt-akash-2',
     userId: 'u-akash',
+    kind: 'RENEWAL_OPPORTUNITY',
     title: 'Renewal Available',
     body: 'Database System Concepts is eligible for a 14-day renewal.',
     at: '2026-11-21T08:00:00+05:30',

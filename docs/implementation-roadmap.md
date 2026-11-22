@@ -1,5 +1,7 @@
 # Implementation roadmap
 
+> **Status (Nov 2026):** the backend runs on PostgreSQL via Prisma (`backend/prisma/migrations`), the mobile app uses it in API mode with SecureStore sessions, and the in-memory store is only for tests/offline demos. Where this planning document disagrees with the code, the code and the READMEs are authoritative.
+
 Work incrementally. Do not implement the whole product in one pass.
 
 ## Phase 1 — Mobile foundation (this milestone)
