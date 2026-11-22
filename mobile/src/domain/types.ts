@@ -1,8 +1,7 @@
-export const NOW = new Date('2026-11-21T09:00:00+05:30');
-
 export type ResourceType = 'PHYSICAL' | 'DIGITAL' | 'BOTH';
-export type CopyStatus = 'AVAILABLE' | 'ON_LOAN' | 'RESERVED';
-export type LoanStatus = 'ACTIVE' | 'RETURNED';
+export type CopyStatus = 'AVAILABLE' | 'ON_LOAN' | 'RESERVED' | 'MAINTENANCE';
+/** OVERDUE is derived by the backend from the due date; treat ACTIVE and OVERDUE as open loans. */
+export type LoanStatus = 'ACTIVE' | 'OVERDUE' | 'RETURNED';
 export type NeedDecision = 'STILL_NEED' | 'DONE' | 'NOT_SURE';
 export type NotificationPreference = 'DIGEST' | 'IMPORTANT' | 'NORMAL' | 'QUIET';
 export type AssessmentType = 'EXAM' | 'ASSIGNMENT' | 'PROJECT' | 'INTERNAL' | 'OTHER';
@@ -16,6 +15,7 @@ export type ActivityKind =
 
 export type ReasonCode =
   | 'ELIGIBLE'
+  | 'LOAN_RETURNED'
   | 'MAX_RENEWALS_REACHED'
   | 'ACTIVE_RESERVATION'
   | 'ITEM_NOT_RENEWABLE'
@@ -147,7 +147,30 @@ export interface FineEntry {
   amount: number;
   reason: string;
   at: string;
-  simulated: true;
+}
+
+export interface FineEstimate {
+  loanId: string;
+  bookId: string;
+  bookTitle: string;
+  daysOverdue: number;
+  estimatedFine: number;
+}
+
+/** Recorded ledger charges (owed) and estimates for open overdue loans (not owed yet) are kept apart. */
+export interface FineSummary {
+  dailyRate: number;
+  ledger: { total: number; entries: FineEntry[] };
+  estimates: { total: number; loans: FineEstimate[] };
+}
+
+export interface LoanFineEstimate {
+  daysLate: number;
+  estimatedAmount: number;
+  dailyRate: number;
+  returned: boolean;
+  recordedAmount: number;
+  calculation: string;
 }
 
 export interface ActivityItem {
@@ -162,10 +185,25 @@ export interface ActivityItem {
 export interface NotificationItem {
   id: string;
   userId: string;
+  kind: string;
   title: string;
   body: string;
   at: string;
   read: boolean;
+}
+
+export interface AcademicContext {
+  needId: string;
+  course: string;
+  topic: string;
+  assessmentType: AssessmentType;
+  assessmentDate: string;
+  neededUntil: string;
+  daysUntilAssessment: number;
+  /** The book is needed after its current due date. */
+  neededBeyondDue: boolean;
+  /** Only known when renewal is possible: would one renewal cover the need? */
+  renewalCoversNeed?: boolean;
 }
 
 export interface EligibilityResult {
@@ -174,15 +212,52 @@ export interface EligibilityResult {
   reason: string;
   suggestedAction: SuggestedAction;
   policyName: string;
+  maxRenewals?: number;
+  renewalsUsed?: number;
+  projectedDueAt?: string;
+  academicContext?: AcademicContext | null;
+}
+
+export interface ActionItem {
+  loanId: string;
+  bookId: string;
+  daysRemaining: number;
+  actionLabel: string;
+  why: string;
+  eligibility: EligibilityResult;
+  academicContext: AcademicContext | null;
+}
+
+/** Dashboard feed. Eligibility comes from the backend in API mode. */
+export interface ActionCentre {
+  needsAttention: ActionItem[];
+  eligibilityByLoan: Record<string, EligibilityResult>;
 }
 
 export interface AlternativeMatch {
   bookId: string;
+  /** Present in API mode, where the catalogue entry comes back with the match. */
+  book?: Book;
   score: number;
   matchingTopics: string[];
   reasons: string[];
   availablePhysical: number;
   digitalAccessible: boolean;
+}
+
+export interface Catalogue {
+  books: Book[];
+  availableCounts: Record<string, number>;
+  topics: Topic[];
+  courses: Course[];
+}
+
+export interface BookDetail {
+  book: Book;
+  copies: BookCopy[];
+  availablePhysical: number;
+  topics: string[];
+  courses: string[];
 }
 
 export interface RegisterInput {

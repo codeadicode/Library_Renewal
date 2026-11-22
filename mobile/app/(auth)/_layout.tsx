@@ -4,8 +4,9 @@ import { useAuth } from '@/src/auth/AuthContext';
 import { useTheme } from '@/src/theme/ThemeContext';
 
 export default function AuthLayout() {
-  const { user } = useAuth();
+  const { user, ready } = useAuth();
   const { colors } = useTheme();
+  if (!ready) return null;
   if (user) return <Redirect href="/(tabs)" />;
 
   return (

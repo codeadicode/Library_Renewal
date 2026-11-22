@@ -1,4 +1,8 @@
 export type CopyStatus = 'AVAILABLE' | 'ON_LOAN' | 'RESERVED' | 'MAINTENANCE';
+/**
+ * Stored loan states are ACTIVE and RETURNED. OVERDUE is *derived* from the due
+ * date whenever a loan is read (see lib/loanStatus.ts) so it can never go stale.
+ */
 export type LoanStatus = 'ACTIVE' | 'RETURNED' | 'OVERDUE';
 export type ReservationStatus = 'ACTIVE' | 'FULFILLED' | 'CANCELLED';
 export type NeedDecision = 'STILL_NEED' | 'DONE' | 'NOT_SURE';
@@ -109,13 +113,32 @@ export interface Course {
   department?: string | null;
 }
 
+export type NotificationPriority = 'HIGH' | 'NORMAL' | 'LOW';
+
 export interface Notification {
   id: string;
   userId: string;
+  loanId?: string | null;
   title: string;
   message: string;
   kind: string;
   read: boolean;
+  createdAt: Date;
+}
+
+export type ScheduledNotificationStatus = 'PENDING' | 'SENT' | 'CANCELLED' | 'SUPPRESSED';
+
+/** A notification that will be delivered later (follow-ups, digests). Persisted so it survives restarts. */
+export interface ScheduledNotification {
+  id: string;
+  userId: string;
+  loanId?: string | null;
+  kind: string;
+  title: string;
+  message: string;
+  sendAt: Date;
+  status: ScheduledNotificationStatus;
+  sentAt?: Date | null;
   createdAt: Date;
 }
 
@@ -148,16 +171,41 @@ export interface LibraryPolicy {
   updatedAt: Date;
 }
 
+export type EligibilityReasonCode =
+  | 'ELIGIBLE'
+  | 'LOAN_RETURNED'
+  | 'LOAN_OVERDUE'
+  | 'ACCOUNT_RESTRICTED'
+  | 'ITEM_NOT_RENEWABLE'
+  | 'ACTIVE_RESERVATION'
+  | 'MAX_RENEWALS_REACHED';
+
+/** How the student's academic plan relates to this loan. */
+export interface AcademicContext {
+  need_id: string;
+  course: string;
+  topic: string;
+  assessment_type: AssessmentType;
+  assessment_date: string;
+  needed_until: string;
+  days_until_assessment: number;
+  /** Loan due date falls before the date the student says they need the material until. */
+  needed_beyond_due: boolean;
+  /** Only set when a renewal is possible: would the renewed due date cover the need? */
+  renewal_covers_need?: boolean;
+}
+
 export interface EligibilityResult {
   eligible: boolean;
-  reason_code: string;
+  reason_code: EligibilityReasonCode;
   reason: string;
-  suggested_action: 'RENEW' | 'FIND_ALTERNATIVE' | 'RETURN';
+  suggested_action: 'RENEW' | 'FIND_ALTERNATIVE' | 'RETURN' | 'NONE';
   policy_name: string;
   max_renewals: number;
   renewals_used: number;
   current_due_at: string;
   projected_due_at?: string;
+  academic_context?: AcademicContext | null;
 }
 
 export interface AlternativeRecommendation {

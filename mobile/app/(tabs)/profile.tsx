@@ -5,7 +5,8 @@ import { ReactNode } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { mockApi } from '@/src/api/mockStore';
+import { api } from '@/src/api';
+import { formatRupees, isOpenLoan } from '@/src/domain/loanDisplay';
 import { useAuth } from '@/src/auth/AuthContext';
 import { AppText, Avatar, Chip, DemoBanner, SectionTitle, Segmented } from '@/src/components/ui';
 import { NotificationPreference } from '@/src/domain/types';
@@ -13,10 +14,10 @@ import { makeStyles, ThemeMode, useTheme } from '@/src/theme/ThemeContext';
 import { radius, spacing } from '@/src/theme/tokens';
 
 const PREFS: { id: NotificationPreference; label: string; hint: string }[] = [
-  { id: 'DIGEST', label: 'Daily digest', hint: 'One summary a day' },
-  { id: 'IMPORTANT', label: 'Important only', hint: 'Urgent and overdue' },
-  { id: 'NORMAL', label: 'Normal', hint: 'Due windows and renewals' },
-  { id: 'QUIET', label: 'Quiet mode', hint: 'No reminder spam' },
+  { id: 'DIGEST', label: 'Daily digest', hint: 'Urgent alerts right away; everything else bundled into one daily summary.' },
+  { id: 'IMPORTANT', label: 'Important only', hint: 'Only due-today, overdue, blocked renewals and follow-ups you asked for.' },
+  { id: 'NORMAL', label: 'Normal', hint: 'Every reminder and confirmation as it happens.' },
+  { id: 'QUIET', label: 'Quiet mode', hint: 'Only overdue warnings (a fine is accruing). Nothing else.' },
 ];
 
 export default function ProfileScreen() {
@@ -28,28 +29,29 @@ export default function ProfileScreen() {
 
   const finesQuery = useQuery({
     queryKey: ['fines', user?.id],
-    queryFn: () => mockApi.listFines(user!.id),
+    queryFn: () => api.getFines(user!.id),
     enabled: Boolean(user),
   });
   const needsQuery = useQuery({
     queryKey: ['needs', user?.id],
-    queryFn: () => mockApi.listNeeds(user!.id),
+    queryFn: () => api.listNeeds(user!.id),
     enabled: Boolean(user),
   });
   const loansQuery = useQuery({
     queryKey: ['loans', user?.id],
-    queryFn: () => mockApi.listLoans(user!.id),
+    queryFn: () => api.listLoans(user!.id),
     enabled: Boolean(user),
   });
 
   if (!user) return null;
-  const currentFine = (finesQuery.data ?? []).reduce((sum, f) => sum + f.amount, 0);
+  const owed = finesQuery.data?.ledger.total ?? 0;
+  const accruing = finesQuery.data?.estimates.total ?? 0;
   const loans = loansQuery.data ?? [];
-  const issued = loans.filter((l) => l.status === 'ACTIVE').length;
+  const issued = loans.filter(isOpenLoan).length;
   const returned = loans.filter((l) => l.status === 'RETURNED').length;
 
   async function setPref(id: NotificationPreference) {
-    await mockApi.updatePreferences(user!.id, id);
+    await api.updatePreferences(user!.id, id);
     await refresh();
   }
 
@@ -80,7 +82,7 @@ export default function ProfileScreen() {
         <View style={styles.heroStats}>
           <MiniStat value={issued} label="Issued" />
           <MiniStat value={returned} label="Returned" />
-          <MiniStat value={`₹${currentFine}`} label="Fines" />
+          <MiniStat value={formatRupees(owed)} label="Fines owed" />
         </View>
       </View>
 
@@ -132,7 +134,11 @@ export default function ProfileScreen() {
             icon={<IndianRupee size={18} color={colors.warning} />}
             bg={colors.warningMuted}
             title="Fines"
-            sub={`Current demo balance ₹${currentFine}`}
+            sub={
+              accruing > 0
+                ? `${formatRupees(owed)} owed · ${formatRupees(accruing)} more if overdue books are returned today`
+                : `${formatRupees(owed)} owed`
+            }
             onPress={() => router.push('/fines')}
           />
           <View style={styles.divider} />

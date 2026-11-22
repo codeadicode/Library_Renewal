@@ -1,5 +1,7 @@
 # Recommendation engine
 
+> **Status (Nov 2026):** the backend runs on PostgreSQL via Prisma (`backend/prisma/migrations`), the mobile app uses it in API mode with SecureStore sessions, and the in-memory store is only for tests/offline demos. Where this planning document disagrees with the code, the code and the READMEs are authoritative.
+
 LibTrack’s differentiator is **explainable, need-aware alternative resources** when a student still needs a title they cannot renew or borrow.
 
 This module is **backend-only**. Phase 1 only shows **mocked** alternatives so the UI and “Still need this book?” flow can be exercised.

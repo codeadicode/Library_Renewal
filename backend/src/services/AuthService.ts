@@ -2,7 +2,19 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { IUserRepository } from '../repositories/interfaces';
-import { SafeUser, User } from '../types';
+import { NotificationPreference, SafeUser, User } from '../types';
+import { conflict, notFound, unauthorized } from '../lib/errors';
+
+/** Claims carried in the JWT. Only identifiers: profile data is always re-read from the database. */
+export interface TokenClaims {
+  sub: string;
+  studentId: string;
+}
+
+const BCRYPT_ROUNDS = 10;
+// Compared against when the account does not exist, so a wrong Student ID and a
+// wrong password take the same time and return the same error.
+const DUMMY_HASH = bcrypt.hashSync('libtrack-timing-equaliser', BCRYPT_ROUNDS);
 
 export class AuthService {
   constructor(private userRepo: IUserRepository) {}
@@ -13,7 +25,8 @@ export class AuthService {
   }
 
   private generateToken(user: SafeUser): string {
-    return jwt.sign(user, config.jwtSecret, { expiresIn: config.jwtExpiresIn } as any);
+    const claims: TokenClaims = { sub: user.id, studentId: user.studentId };
+    return jwt.sign(claims, config.jwtSecret, { expiresIn: config.jwtExpiresIn } as jwt.SignOptions);
   }
 
   public async register(input: {
@@ -24,27 +37,21 @@ export class AuthService {
     course: string;
     academicYear: string;
   }): Promise<{ user: SafeUser; token: string }> {
-    const existingStudentId = await this.userRepo.findByStudentId(input.studentId);
-    if (existingStudentId) {
-      const err = new Error('Student ID is already registered');
-      (err as any).statusCode = 409;
-      throw err;
+    const studentId = input.studentId.trim();
+    const email = input.email.trim().toLowerCase();
+
+    if (await this.userRepo.findByStudentId(studentId)) {
+      throw conflict('Student ID is already registered');
+    }
+    if (await this.userRepo.findByEmail(email)) {
+      throw conflict('Email address is already registered');
     }
 
-    const existingEmail = await this.userRepo.findByEmail(input.email);
-    if (existingEmail) {
-      const err = new Error('Email address is already registered');
-      (err as any).statusCode = 409;
-      throw err;
-    }
-
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(input.password, salt);
-
+    const passwordHash = await bcrypt.hash(input.password, BCRYPT_ROUNDS);
     const user = await this.userRepo.create({
-      studentId: input.studentId.trim(),
+      studentId,
       name: input.name.trim(),
-      email: input.email.trim().toLowerCase(),
+      email,
       passwordHash,
       course: input.course.trim(),
       academicYear: input.academicYear.trim(),
@@ -53,48 +60,37 @@ export class AuthService {
     });
 
     const safeUser = this.sanitize(user);
-    const token = this.generateToken(safeUser);
-    return { user: safeUser, token };
+    return { user: safeUser, token: this.generateToken(safeUser) };
   }
 
-  public async login(
-    identifier: string,
-    password: string,
-  ): Promise<{ user: SafeUser; token: string }> {
+  public async login(identifier: string, password: string): Promise<{ user: SafeUser; token: string }> {
     const key = identifier.trim();
-    let user = await this.userRepo.findByStudentId(key);
-    if (!user) {
-      user = await this.userRepo.findByEmail(key);
-    }
+    const user = (await this.userRepo.findByStudentId(key)) ?? (await this.userRepo.findByEmail(key));
 
-    if (!user) {
-      const err = new Error('Invalid Student ID / email or password');
-      (err as any).statusCode = 401;
-      throw err;
+    const passwordOk = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH);
+    if (!user || !passwordOk) {
+      throw unauthorized('Invalid Student ID / email or password');
     }
-
-    // Demo mode: any password (even an empty one) is accepted for a known Student ID / email.
-    void password;
 
     const safeUser = this.sanitize(user);
-    const token = this.generateToken(safeUser);
-    return { user: safeUser, token };
+    return { user: safeUser, token: this.generateToken(safeUser) };
+  }
+
+  public verifyToken(token: string): TokenClaims {
+    const decoded = jwt.verify(token, config.jwtSecret);
+    if (typeof decoded !== 'object' || typeof decoded.sub !== 'string') {
+      throw unauthorized('Invalid authentication token');
+    }
+    return { sub: decoded.sub, studentId: String((decoded as jwt.JwtPayload).studentId ?? '') };
   }
 
   public async getProfile(userId: string): Promise<SafeUser> {
     const user = await this.userRepo.findById(userId);
-    if (!user) {
-      const err = new Error('User not found');
-      (err as any).statusCode = 404;
-      throw err;
-    }
+    if (!user) throw notFound('User not found');
     return this.sanitize(user);
   }
 
-  public async updatePreferences(
-    userId: string,
-    pref: 'DIGEST' | 'IMPORTANT' | 'NORMAL' | 'QUIET',
-  ): Promise<SafeUser> {
+  public async updatePreferences(userId: string, pref: NotificationPreference): Promise<SafeUser> {
     const updated = await this.userRepo.update(userId, { notificationPreference: pref });
     return this.sanitize(updated);
   }
@@ -103,15 +99,15 @@ export class AuthService {
     userId: string,
     patch: { name?: string; email?: string; course?: string; academicYear?: string },
   ): Promise<SafeUser> {
-    if (patch.email) {
-      const existing = await this.userRepo.findByEmail(patch.email);
+    const clean = { ...patch };
+    if (clean.email) {
+      clean.email = clean.email.trim().toLowerCase();
+      const existing = await this.userRepo.findByEmail(clean.email);
       if (existing && existing.id !== userId) {
-        const err = new Error('That email is already used by another student.');
-        (err as any).statusCode = 409;
-        throw err;
+        throw conflict('That email is already used by another student.');
       }
     }
-    const updated = await this.userRepo.update(userId, patch);
+    const updated = await this.userRepo.update(userId, clean);
     return this.sanitize(updated);
   }
 }

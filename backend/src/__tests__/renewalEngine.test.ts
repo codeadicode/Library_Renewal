@@ -1,35 +1,26 @@
 import { RenewalService } from '../services/RenewalService';
-import {
-  MemoryStore,
-  MemoryBookRepository,
-  MemoryLoanRepository,
-  MemoryPolicyRepository,
-  MemoryRenewalAttemptRepository,
-  MemoryReservationRepository,
-  MemoryUserRepository,
-} from '../repositories/memoryStore';
+import { MemoryDataStore, MemoryStore } from '../repositories/memoryStore';
+import { setClockOverride } from '../lib/clock';
+
+const ANCHOR = new Date('2026-11-21T06:30:00Z');
 
 describe('Renewal Eligibility Engine', () => {
   let store: MemoryStore;
   let service: RenewalService;
 
   beforeEach(() => {
-    store = new MemoryStore();
-    service = new RenewalService(
-      new MemoryLoanRepository(store),
-      new MemoryBookRepository(store),
-      new MemoryReservationRepository(store),
-      new MemoryUserRepository(store),
-      new MemoryPolicyRepository(store),
-      new MemoryRenewalAttemptRepository(store),
-    );
+    setClockOverride(ANCHOR);
+    store = new MemoryStore(ANCHOR);
+    service = new RenewalService(new MemoryDataStore(store));
   });
+
+  afterAll(() => setClockOverride(null));
 
   test('Permits renewal for eligible book with correct +14 days projection', async () => {
     // Akash Tiwari (1RV25CS013) with Database System Concepts
     const { eligibility, loan } = await service.evaluateEligibility('l-akash-dsc', 'u-akash');
     expect(eligibility.eligible).toBe(true);
-    expect(eligibility.reason_code).toBe('RENEWAL_SUCCESS');
+    expect(eligibility.reason_code).toBe('ELIGIBLE');
     expect(eligibility.suggested_action).toBe('RENEW');
     expect(eligibility.projected_due_at).toBeDefined();
 

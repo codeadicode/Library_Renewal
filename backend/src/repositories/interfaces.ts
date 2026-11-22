@@ -2,6 +2,7 @@ import {
   User,
   Book,
   BookCopy,
+  CopyStatus,
   Loan,
   Reservation,
   RenewalAttempt,
@@ -11,6 +12,8 @@ import {
   Notification,
   FineLedger,
   LibraryPolicy,
+  ScheduledNotification,
+  ScheduledNotificationStatus,
 } from '../types';
 
 export interface IUserRepository {
@@ -28,16 +31,30 @@ export interface IBookRepository {
   findTopics(): Promise<Topic[]>;
   findCourses(): Promise<Course[]>;
   findCopiesByBookId(bookId: string): Promise<BookCopy[]>;
+  findCopyById(copyId: string): Promise<BookCopy | null>;
   countAvailablePhysicalCopies(bookId: string): Promise<number>;
   countAllAvailablePhysical(): Promise<Map<string, number>>;
+  /**
+   * Atomically moves one AVAILABLE copy of the book to `nextStatus` and returns it,
+   * or null when no copy is free. Safe under concurrent borrows.
+   */
+  claimAvailableCopy(bookId: string, nextStatus: CopyStatus): Promise<BookCopy | null>;
+  updateCopyStatus(copyId: string, status: CopyStatus): Promise<BookCopy>;
 }
 
 export interface ILoanRepository {
   findById(id: string): Promise<Loan | null>;
   findByUserId(userId: string): Promise<Loan[]>;
   findActiveByCopyId(copyId: string): Promise<Loan | null>;
+  findOpenLoans(): Promise<Loan[]>;
   create(data: Omit<Loan, 'id' | 'createdAt' | 'updatedAt'>): Promise<Loan>;
   update(id: string, data: Partial<Loan>): Promise<Loan>;
+  /**
+   * Takes a row lock on the loan for the rest of the current transaction
+   * (SELECT ... FOR UPDATE in PostgreSQL). Concurrent renewals/returns of the
+   * same loan queue behind each other instead of racing.
+   */
+  lockForUpdate(id: string): Promise<void>;
 }
 
 export interface IReservationRepository {
@@ -62,11 +79,23 @@ export interface INotificationRepository {
   findByUserId(userId: string): Promise<Notification[]>;
   create(data: Omit<Notification, 'id' | 'createdAt'>): Promise<Notification>;
   markRead(id: string, userId: string): Promise<Notification | null>;
-  findDuplicateRecent(userId: string, kind: string, title: string, withinMinutes: number): Promise<boolean>;
+  findDuplicateRecent(userId: string, kind: string, title: string, since: Date): Promise<boolean>;
+}
+
+export interface IScheduledNotificationRepository {
+  create(
+    data: Omit<ScheduledNotification, 'id' | 'createdAt' | 'status' | 'sentAt'>,
+  ): Promise<ScheduledNotification>;
+  findDue(asOf: Date, limit: number): Promise<ScheduledNotification[]>;
+  findPendingByUserId(userId: string): Promise<ScheduledNotification[]>;
+  /** Moves a PENDING row to a final status. Returns false if another worker already handled it. */
+  complete(id: string, status: Exclude<ScheduledNotificationStatus, 'PENDING'>, at: Date): Promise<boolean>;
+  cancelPendingForLoan(loanId: string, kind?: string): Promise<number>;
 }
 
 export interface IFineRepository {
   findByUserId(userId: string): Promise<FineLedger[]>;
+  findByLoanId(loanId: string): Promise<FineLedger[]>;
   create(data: Omit<FineLedger, 'id' | 'createdAt'>): Promise<FineLedger>;
 }
 
@@ -74,3 +103,27 @@ export interface IPolicyRepository {
   getDefaultPolicy(): Promise<LibraryPolicy>;
 }
 
+export interface Repositories {
+  users: IUserRepository;
+  books: IBookRepository;
+  loans: ILoanRepository;
+  reservations: IReservationRepository;
+  renewalAttempts: IRenewalAttemptRepository;
+  academicNeeds: IAcademicNeedRepository;
+  notifications: INotificationRepository;
+  scheduledNotifications: IScheduledNotificationRepository;
+  fines: IFineRepository;
+  policy: IPolicyRepository;
+}
+
+export interface DataStore {
+  readonly driver: 'postgres' | 'memory';
+  readonly repos: Repositories;
+  /**
+   * Runs `work` atomically. Every repository call made through the `tx`
+   * argument commits together or not at all.
+   */
+  transaction<T>(work: (tx: Repositories) => Promise<T>): Promise<T>;
+  ping(): Promise<void>;
+  disconnect(): Promise<void>;
+}

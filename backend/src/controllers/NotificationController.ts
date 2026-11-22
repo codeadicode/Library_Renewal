@@ -29,5 +29,13 @@ export class NotificationController {
       next(err);
     }
   };
-}
 
+  public getScheduled = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const rows = await this.notificationService.getPendingScheduled(req.user!.id);
+      res.status(200).json(rows);
+    } catch (err) {
+      next(err);
+    }
+  };
+}

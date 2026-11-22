@@ -7,6 +7,8 @@ export interface EvalQuery {
   needs?: AcademicNeed[];
 }
 
+const K = 5;
+
 export interface EvalMetrics {
   precisionAt5: number;
   recallAt5: number;
@@ -48,8 +50,9 @@ export class RecommendationEvaluator {
     availableCounts: Map<string, number>;
     policy: LibraryPolicy;
     weights?: { metadata: number; tfidf: number; course: number; level: number };
+    at?: Date;
   }): EvalMetrics {
-    const { queries, books, topicLookup, courseLookup, availableCounts, policy, weights } = params;
+    const { queries, books, topicLookup, courseLookup, availableCounts, policy, weights, at } = params;
     this.engine.indexCatalogue(books, topicLookup, courseLookup);
 
     let totalP5 = 0;
@@ -73,17 +76,19 @@ export class RecommendationEvaluator {
         availablePhysicalCounts: availableCounts,
         policy,
         weights,
+        at,
       });
       const latency = performance.now() - startTime;
       totalLatency += latency;
 
-      const top5 = recs.slice(0, 5);
+      const top5 = recs.slice(0, K);
       const top5Ids = top5.map((r) => r.book.id);
       const relevantSet = new Set(q.relevantBookIds);
 
-      // Precision@5
+      // Precision@5 — always divided by k. Dividing by the number of results
+      // returned would reward an engine for returning fewer than 5 items.
       const hits = top5Ids.filter((id) => relevantSet.has(id)).length;
-      const p5 = top5Ids.length > 0 ? hits / top5Ids.length : 0;
+      const p5 = hits / K;
       totalP5 += p5;
 
       // Recall@5
@@ -91,8 +96,8 @@ export class RecommendationEvaluator {
       totalR5 += r5;
 
       // NDCG@5
-      const dcg = this.computeDCG(top5Ids, relevantSet, 5);
-      const idcg = this.computeIDCG(relevantSet.size, 5);
+      const dcg = this.computeDCG(top5Ids, relevantSet, K);
+      const idcg = this.computeIDCG(relevantSet.size, K);
       totalNDCG5 += dcg / idcg;
 
       // Availability-aware rate: share of top-5 that are actually accessible (physical > 0 or digital)

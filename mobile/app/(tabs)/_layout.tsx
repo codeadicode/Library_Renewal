@@ -6,9 +6,10 @@ import { useAuth } from '@/src/auth/AuthContext';
 import { useTheme } from '@/src/theme/ThemeContext';
 
 export default function TabLayout() {
-  const { user } = useAuth();
+  const { user, ready } = useAuth();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
+  if (!ready) return null;
   if (!user) return <Redirect href="/(auth)/login" />;
 
   // Ensure bottom bar accommodates Android 3-button software navigation & gesture bars

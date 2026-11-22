@@ -5,8 +5,10 @@ import { ChevronRight } from 'lucide-react-native';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { availablePhysicalCount, evaluateEligibility, getBook, mockApi } from '@/src/api/mockStore';
+import { api } from '@/src/api';
+import { useActionCentre, useCatalogue, usePolicy } from '@/src/api/hooks';
 import { useAuth } from '@/src/auth/AuthContext';
+import { now } from '@/src/config';
 import {
   AppText,
   Avatar,
@@ -18,8 +20,16 @@ import {
   LoadingBlock,
   SectionTitle,
 } from '@/src/components/ui';
-import { daysRemaining, eligibilityTone, formatDate, urgencyLabel, urgencyTone } from '@/src/domain/loanDisplay';
-import { ActivityKind, BookFilter, NOW } from '@/src/domain/types';
+import {
+  eligibilityTone,
+  formatDate,
+  isOpenLoan,
+  loanMatchesFilter,
+  urgencyLabel,
+  urgencyTone,
+  daysRemaining,
+} from '@/src/domain/loanDisplay';
+import { ActivityKind, BookFilter } from '@/src/domain/types';
 import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
 import { Palette, radius, spacing } from '@/src/theme/tokens';
 
@@ -47,44 +57,59 @@ export default function HomeScreen() {
   const { colors } = useTheme();
   const styles = useStyles();
 
+  const policy = usePolicy();
+  const catalogue = useCatalogue();
+  const actionsQuery = useActionCentre();
   const loansQuery = useQuery({
     queryKey: ['loans', user?.id],
-    queryFn: () => mockApi.listLoans(user!.id),
+    queryFn: () => api.listLoans(user!.id),
     enabled: Boolean(user),
   });
   const activityQuery = useQuery({
     queryKey: ['activity', user?.id],
-    queryFn: () => mockApi.listActivity(user!.id),
+    queryFn: () => api.listActivity(user!.id),
     enabled: Boolean(user),
   });
   const availableQuery = useQuery({
     queryKey: ['books', 'home-available'],
-    queryFn: () => mockApi.listBooks({ available: true, type: 'PHYSICAL' }),
+    queryFn: () => api.listBooks({ available: true, type: 'PHYSICAL' }),
+    enabled: Boolean(user),
   });
 
   if (!user) return null;
-  if (loansQuery.isLoading) return <LoadingBlock />;
-  if (loansQuery.isError) {
-    return <ErrorBlock message={(loansQuery.error as Error).message} onRetry={() => loansQuery.refetch()} />;
+  if (loansQuery.isLoading || actionsQuery.isLoading || catalogue.isLoading) return <LoadingBlock />;
+  const failed = [loansQuery, actionsQuery].find((q) => q.isError);
+  if (failed || catalogue.isError) {
+    const err = (failed?.error ?? catalogue.error) as Error;
+    return (
+      <ErrorBlock
+        message={err.message}
+        onRetry={() => {
+          loansQuery.refetch();
+          actionsQuery.refetch();
+          catalogue.refetch();
+        }}
+      />
+    );
   }
 
   const all = loansQuery.data ?? [];
-  const count = (f: BookFilter) => all.filter((l) => mockApi.loanMatchesFilter(l, f)).length;
-  const active = all.filter((l) => l.status === 'ACTIVE');
-  const issuedIds = new Set(active.map((l) => l.bookId));
+  const dueSoonDays = policy.approachingMaxDays;
+  const count = (f: BookFilter) => all.filter((l) => loanMatchesFilter(l, f, dueSoonDays)).length;
+  const open = all.filter(isOpenLoan);
+  const issuedIds = new Set(open.map((l) => l.bookId));
+  const loanById = new Map(all.map((l) => [l.id, l]));
 
-  const attention = active
-    .map((loan) => ({
-      loan,
-      book: getBook(loan.bookId),
-      eligibility: evaluateEligibility(loan, user),
-      days: daysRemaining(loan.dueAt),
-    }))
-    .filter((row) => row.book && (row.days <= 7 || row.loan.markedForReturn))
-    .sort((a, b) => a.days - b.days);
+  // Eligibility, priority and the suggested action all come from the backend
+  // (or the mock in offline mode); nothing is re-derived on the device.
+  const attention = (actionsQuery.data?.needsAttention ?? [])
+    .map((item) => ({ item, loan: loanById.get(item.loanId), book: catalogue.getBook(item.bookId) }))
+    .filter((row) => row.loan && row.book);
+  const attentionIds = new Set(attention.map((row) => row.item.loanId));
 
-  const onTrack = active.filter((l) => daysRemaining(l.dueAt) > 7 && !l.markedForReturn);
-  const available = (availableQuery.data ?? []).filter((b) => !issuedIds.has(b.id)).slice(0, 10);
+  const onTrack = open.filter((l) => !attentionIds.has(l.id));
+  const available = (availableQuery.data?.books ?? []).filter((b) => !issuedIds.has(b.id)).slice(0, 10);
+  const availableCounts = availableQuery.data?.availableCounts ?? {};
   const firstName = user.name.split(' ')[0];
   const openBooks = (filter: BookFilter) => router.push({ pathname: '/(tabs)/books', params: { filter } });
 
@@ -93,7 +118,7 @@ export default function HomeScreen() {
       <View style={[styles.hero, { paddingTop: insets.top + spacing.lg }]}>
         <View style={styles.heroTop}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.heroDate}>{format(NOW, 'EEEE, d MMMM')}</Text>
+            <Text style={styles.heroDate}>{format(now(), 'EEEE, d MMMM')}</Text>
             <Text style={styles.heroTitle}>Hello, {firstName}!</Text>
             <Text style={styles.heroSub}>
               {user.course} · {user.academicYear}
@@ -117,40 +142,39 @@ export default function HomeScreen() {
         <SectionTitle>Needs your attention</SectionTitle>
         {attention.length === 0 ? (
           <View style={[styles.card, { alignItems: 'center' }]}>
-            <EmptyState title="All caught up" body="Nothing is due in the next 7 days." />
+            <EmptyState title="All caught up" body={'Nothing is due in the next ' + dueSoonDays + ' days.'} />
           </View>
         ) : (
-          attention.map((row) => {
-            const tone = urgencyTone(row.days, colors);
-            const elig = eligibilityTone(row.eligibility, colors);
-            const action = row.loan.markedForReturn
-              ? 'Prepare return'
-              : row.eligibility.eligible
-                ? 'Check renewal'
-                : row.eligibility.suggestedAction === 'FIND_ALTERNATIVE'
-                  ? 'Find alternatives'
-                  : 'Review';
+          attention.map(({ item, loan, book }) => {
+            const days = item.daysRemaining;
+            const tone = urgencyTone(days, colors);
+            const elig = eligibilityTone(item.eligibility, colors);
             return (
               <Pressable
-                key={row.loan.id}
-                onPress={() => router.push(`/decision/${row.loan.id}`)}
+                key={item.loanId}
+                onPress={() => router.push(`/decision/${item.loanId}`)}
                 style={({ pressed }) => [styles.card, styles.attnCard, { borderLeftColor: tone.fg, opacity: pressed ? 0.85 : 1 }]}>
-                <BookCover title={row.book!.title} seed={row.book!.category + row.book!.id} size={46} />
+                <BookCover title={book!.title} seed={book!.category + book!.id} size={46} />
                 <View style={{ flex: 1, gap: 4 }}>
                   <AppText variant="bodyStrong" numberOfLines={2}>
-                    {row.book!.title}
+                    {book!.title}
                   </AppText>
-                  <AppText variant="caption">Due {formatDate(row.loan.dueAt)}</AppText>
+                  <AppText variant="caption">Due {formatDate(loan!.dueAt)}</AppText>
                   <View style={styles.badgeRow}>
-                    <Badge label={urgencyLabel(row.days)} fg={tone.fg} bg={tone.bg} />
+                    <Badge label={urgencyLabel(days)} fg={tone.fg} bg={tone.bg} />
                     <Badge label={elig.label} fg={elig.fg} bg={elig.bg} />
+                    {item.academicContext ? (
+                      <Badge
+                        label={item.academicContext.assessmentType.toLowerCase() + ' in ' + item.academicContext.daysUntilAssessment + 'd'}
+                        fg={colors.info}
+                        bg={colors.infoMuted}
+                      />
+                    ) : null}
                   </View>
-                  {!row.eligibility.eligible ? (
-                    <AppText variant="caption">{row.eligibility.reason}</AppText>
-                  ) : null}
+                  <AppText variant="caption">{item.why}</AppText>
                   <View style={styles.actionRow}>
                     <AppText variant="bodyStrong" style={{ color: colors.accent }}>
-                      {action}
+                      {item.actionLabel}
                     </AppText>
                     <ChevronRight size={16} color={colors.accent} />
                   </View>
@@ -172,7 +196,7 @@ export default function HomeScreen() {
         </SectionTitle>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: spacing.md }}>
           {available.map((book) => {
-            const n = availablePhysicalCount(book.id);
+            const n = availableCounts[book.id] ?? 0;
             return (
               <Pressable
                 key={book.id}
@@ -199,7 +223,7 @@ export default function HomeScreen() {
                 <Pressable key={loan.id} onPress={() => router.push(`/book/${loan.id}`)} style={styles.trackRow}>
                   <View style={[styles.dot, { backgroundColor: colors.success }]} />
                   <AppText variant="bodyStrong" style={{ flex: 1 }} numberOfLines={1}>
-                    {getBook(loan.bookId)?.title}
+                    {catalogue.getBook(loan.bookId)?.title}
                   </AppText>
                   <AppText variant="caption">{urgencyLabel(daysRemaining(loan.dueAt))}</AppText>
                 </Pressable>

@@ -17,8 +17,7 @@ export class FineController {
 
   public estimateFine = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
-      const loanId = req.params.loanId;
-      const estimate = await this.fineService.estimateLateFine(loanId);
+      const estimate = await this.fineService.estimateLateFine(req.params.loanId, req.user!.id);
       res.status(200).json(estimate);
     } catch (err) {
       next(err);

@@ -1,4 +1,6 @@
+import { differenceInCalendarDays } from 'date-fns';
 import { Book, Topic, Course, AcademicNeed } from '../types';
+import { needUrgencyWeight } from '../services/academicPlanning';
 
 export function jaccardSimilarity(setA: string[], setB: string[]): number {
   const a = new Set(setA);
@@ -15,8 +17,10 @@ export function computeMetadataSimilarity(
   academicNeeds: AcademicNeed[],
   topicLookup: Map<string, Topic>,
   courseLookup: Map<string, Course>,
+  at: Date = new Date(),
 ): {
   metadataScore: number;
+  needBoost: number;
   courseScore: number;
   levelScore: number;
   matchingTopics: string[];
@@ -26,16 +30,22 @@ export function computeMetadataSimilarity(
   const courseOverlap = jaccardSimilarity(source.courseIds, candidate.courseIds);
   const levelScore = source.academicLevel === candidate.academicLevel ? 1.0 : 0.4;
 
-  // Boost if candidate matches student's explicit academic needs
-  const needTopics = academicNeeds.map((n) => n.topic.toLowerCase());
+  // Boost if the candidate covers one of the student's active academic needs.
+  // The boost scales with how soon the assessment is (see needUrgencyWeight),
+  // so an exam next week matters more than a project next semester.
   const candidateTopicNames = candidate.topicIds
     .map((id) => topicLookup.get(id)?.name.toLowerCase() || '')
     .filter(Boolean);
 
-  const hasNeedBoost = candidateTopicNames.some((name) =>
-    needTopics.some((need) => need.includes(name) || name.includes(need)),
-  );
-  const needBoost = hasNeedBoost ? 0.2 : 0.0;
+  let strongestNeed: { need: AcademicNeed; weight: number } | null = null;
+  for (const need of academicNeeds) {
+    const needTopic = need.topic.toLowerCase();
+    const matches = candidateTopicNames.some((name) => needTopic.includes(name) || name.includes(needTopic));
+    if (!matches) continue;
+    const weight = needUrgencyWeight(need, at);
+    if (weight > 0 && (!strongestNeed || weight > strongestNeed.weight)) strongestNeed = { need, weight };
+  }
+  const needBoost = strongestNeed ? 0.2 * strongestNeed.weight : 0;
   const metadataScore = Math.min(1.0, topicOverlap * 0.8 + needBoost);
 
   const matchingTopics = candidate.topicIds
@@ -56,12 +66,16 @@ export function computeMetadataSimilarity(
     reasons.push(`Matches academic level (${candidate.academicLevel}).`);
   }
 
-  if (hasNeedBoost) {
-    reasons.push(`Matches your active academic requirement.`);
+  if (strongestNeed) {
+    const { need } = strongestNeed;
+    const days = differenceInCalendarDays(new Date(need.assessmentDate), at);
+    const when = days < 0 ? 'already held' : days === 0 ? 'today' : `in ${days} day${days === 1 ? '' : 's'}`;
+    reasons.push(`Covers ${need.topic} for your ${need.assessmentType.toLowerCase()} (${when}).`);
   }
 
   return {
     metadataScore,
+    needBoost,
     courseScore: courseOverlap,
     levelScore,
     matchingTopics,

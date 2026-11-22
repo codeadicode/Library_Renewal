@@ -5,6 +5,9 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } fro
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '@/src/auth/AuthContext';
+
+/** Password of the seeded demo students (backend seed and offline mock). */
+const DEMO_PASSWORD = 'demo1234';
 import { AppText, Avatar, Field, PrimaryButton } from '@/src/components/ui';
 import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
 import { radius, spacing } from '@/src/theme/tokens';
@@ -18,7 +21,7 @@ const DEMO_ACCOUNTS = [
 ];
 
 export default function LoginScreen() {
-  const { login } = useAuth();
+  const { login, sessionMessage } = useAuth();
   const { colors } = useTheme();
   const styles = useStyles();
   const insets = useSafeAreaInsets();
@@ -27,11 +30,15 @@ export default function LoginScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function signIn(id: string) {
+  async function signIn(id: string, pw: string = password) {
     setError(null);
+    if (!pw) {
+      setError('Enter your password.');
+      return;
+    }
     setBusy(true);
     try {
-      await login(id, password);
+      await login(id, pw);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not sign in.');
     } finally {
@@ -65,8 +72,13 @@ export default function LoginScreen() {
               onChangeText={setPassword}
               secure
               autoCapitalize="none"
-              placeholder="Any password works in this demo"
+              placeholder="Your password"
             />
+            {sessionMessage && !error ? (
+              <AppText variant="caption" style={{ color: colors.warning }}>
+                {sessionMessage}
+              </AppText>
+            ) : null}
             {error ? (
               <AppText variant="caption" style={{ color: colors.danger }}>
                 {error}
@@ -75,7 +87,7 @@ export default function LoginScreen() {
             <PrimaryButton label={busy ? 'Signing in…' : 'Sign in'} onPress={() => signIn(identifier)} disabled={busy} />
           </View>
 
-          <AppText variant="label">QUICK SIGN-IN · DEMO ACCOUNTS</AppText>
+          <AppText variant="label">QUICK SIGN-IN · DEMO ACCOUNTS (password {DEMO_PASSWORD})</AppText>
           <View style={{ gap: spacing.sm }}>
             {DEMO_ACCOUNTS.map((a) => (
               <Pressable
@@ -83,7 +95,8 @@ export default function LoginScreen() {
                 disabled={busy}
                 onPress={() => {
                   setIdentifier(a.id);
-                  signIn(a.id);
+                  setPassword(DEMO_PASSWORD);
+                  signIn(a.id, DEMO_PASSWORD);
                 }}
                 style={({ pressed }) => [styles.account, { opacity: pressed ? 0.8 : 1 }]}>
                 <Avatar name={a.name} size={40} />

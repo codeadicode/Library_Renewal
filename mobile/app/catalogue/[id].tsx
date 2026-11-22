@@ -2,9 +2,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Alert, ScrollView, Text, View } from 'react-native';
 
-import { mockApi } from '@/src/api/mockStore';
+import { api } from '@/src/api';
 import { useAuth } from '@/src/auth/AuthContext';
 import { AppText, Badge, BookCover, Card, DemoBanner, ErrorBlock, LoadingBlock, PrimaryButton } from '@/src/components/ui';
+import { formatDate, isOpenLoan } from '@/src/domain/loanDisplay';
 import { CopyStatus } from '@/src/domain/types';
 import { makeStyles, useTheme } from '@/src/theme/ThemeContext';
 import { coverColor, Palette, radius, spacing } from '@/src/theme/tokens';
@@ -25,27 +26,27 @@ export default function CatalogueDetailScreen() {
 
   const detailQuery = useQuery({
     queryKey: ['book', id],
-    queryFn: () => mockApi.getBookDetail(id),
-    enabled: Boolean(id),
+    queryFn: () => api.getBookDetail(id),
+    enabled: Boolean(id && user),
   });
   const loansQuery = useQuery({
     queryKey: ['loans', user?.id],
-    queryFn: () => mockApi.listLoans(user!.id),
+    queryFn: () => api.listLoans(user!.id),
     enabled: Boolean(user),
   });
   const reserve = useMutation({
-    mutationFn: () => mockApi.reserve(user!.id, id),
+    mutationFn: () => api.reserve(user!.id, id),
     onSuccess: async () => {
       await queryClient.invalidateQueries();
-      Alert.alert('Reservation placed', 'You will be next in line for this book (demo).');
+      Alert.alert('Reservation placed', 'You are in the queue for this book.');
     },
     onError: (e: Error) => Alert.alert('Could not reserve', e.message),
   });
   const borrow = useMutation({
-    mutationFn: () => mockApi.borrowBook(user!.id, id),
+    mutationFn: () => api.borrowBook(user!.id, id),
     onSuccess: async (loan) => {
       await queryClient.invalidateQueries();
-      Alert.alert('Book issued', `Due back on ${loan.dueAt.slice(0, 10)}. Find it under My Books.`);
+      Alert.alert('Book issued', `Due back on ${formatDate(loan.dueAt)}. Find it under My Books.`);
     },
     onError: (e: Error) => Alert.alert('Could not borrow', e.message),
   });
@@ -56,7 +57,7 @@ export default function CatalogueDetailScreen() {
   }
   if (!detailQuery.data) return null;
   const { book, copies, availablePhysical, topics, courses } = detailQuery.data;
-  const myLoan = (loansQuery.data ?? []).find((l) => l.bookId === book.id && l.status === 'ACTIVE');
+  const myLoan = (loansQuery.data ?? []).find((l) => l.bookId === book.id && isOpenLoan(l));
   const accessible = availablePhysical > 0 || Boolean(book.digitalUrl);
 
   return (

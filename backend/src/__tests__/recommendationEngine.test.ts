@@ -83,6 +83,7 @@ describe('Alternative Resource Recommendation Engine', () => {
       sourceBook,
       candidates: allBooks,
       academicNeeds: needs,
+      at: new Date('2026-11-21T06:30:00Z'),
       topicLookup: store.topics,
       courseLookup: store.courses,
       availablePhysicalCounts: availableCounts,
@@ -91,7 +92,7 @@ describe('Alternative Resource Recommendation Engine', () => {
 
     const elmasri = recsWithNeed.find((r) => r.book.id === 'b-elmasri');
     expect(elmasri).toBeDefined();
-    expect(elmasri!.reasons.some((r) => r.includes('academic requirement'))).toBe(true);
+    expect(elmasri!.reasons.some((r) => r.includes('for your internal (in 7 days)'))).toBe(true);
   });
 
   test('Separately checks physical availability and prioritises accessible copies', () => {

@@ -1,4 +1,5 @@
 import { ReactNode } from 'react';
+import { isApiMode } from '../config';
 import {
   ActivityIndicator,
   Pressable,
@@ -30,7 +31,9 @@ export function DemoBanner() {
   return (
     <View style={styles.demo}>
       <AppText variant="label" style={{ color: colors.info }}>
-        DEMO DATA · not a real college library record
+        {isApiMode
+          ? 'LIBTRACK SERVER · simulated college library, not a real record'
+          : 'OFFLINE DEMO DATA · not connected to the LibTrack server'}
       </AppText>
     </View>
   );

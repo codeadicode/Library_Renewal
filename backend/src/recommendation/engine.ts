@@ -9,6 +9,7 @@ import {
 import { TfIdf } from './tfidf';
 import { computeMetadataSimilarity } from './metadataMatcher';
 import { EmbeddingProvider, RecommendationScoringWeights } from './types';
+import { now } from '../lib/clock';
 
 export class RecommendationEngine {
   private tfidf: TfIdf;
@@ -38,6 +39,8 @@ export class RecommendationEngine {
     availablePhysicalCounts: Map<string, number>;
     policy: LibraryPolicy;
     weights?: Partial<RecommendationScoringWeights>;
+    /** Reference time for assessment urgency. Defaults to the app clock. */
+    at?: Date;
   }): AlternativeRecommendation[] {
     const {
       sourceBook,
@@ -48,6 +51,7 @@ export class RecommendationEngine {
       availablePhysicalCounts,
       policy,
     } = params;
+    const at = params.at ?? now();
 
     const weights: RecommendationScoringWeights = {
       metadata: params.weights?.metadata ?? policy.weightMetadata,
@@ -77,6 +81,7 @@ export class RecommendationEngine {
         academicNeeds,
         topicLookup,
         courseLookup,
+        at,
       );
 
       // Layer 2: TF-IDF and cosine similarity
@@ -100,9 +105,7 @@ export class RecommendationEngine {
       // Alternative learning resource must have subject, topic, course or strong semantic relevance
       const hasTopicOverlap = meta.matchingTopics.length > 0;
       const hasCourseOverlap = meta.courseScore > 0;
-      const hasNeedBoost = academicNeeds.some((n) =>
-        candidate.topicIds.some((tid) => topicLookup.get(tid)?.name.toLowerCase().includes(n.topic.toLowerCase())),
-      );
+      const hasNeedBoost = meta.needBoost > 0;
       const hasStrongText = tfidfScore >= 0.15;
       if (!hasTopicOverlap && !hasCourseOverlap && !hasNeedBoost && !hasStrongText) {
         continue;
